@@ -608,7 +608,7 @@ export default function App() {
       <aside className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
         <div className="sidebar-header">
           <div>
-            <p className="sidebar-brand"><span className="sidebar-brand-dot" />OpenZirndorf</p>
+            <a href="https://openzirndorf.de" target="_blank" rel="noopener noreferrer" className="sidebar-brand"><span className="sidebar-brand-dot" />OpenZirndorf</a>
             <h1>Zirndorf Mobil</h1>
             <p className="subtitle">Busse &amp; Bahnen in Echtzeit</p>
           </div>
@@ -799,6 +799,8 @@ export default function App() {
           </div>
           <div className="footer-bottom">
             <a href="https://openzirndorf.de" target="_blank" rel="noopener noreferrer">OpenZirndorf</a>
+            {" · "}
+            <a href="https://portal.openzirndorf.de" target="_blank" rel="noopener noreferrer">Alle Apps →</a>
             {" · "}Made with ❤️ in Zirndorf
           </div>
         </footer>

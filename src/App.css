@@ -110,7 +110,9 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.1em;
   margin-bottom: 4px;
+  text-decoration: none;
 }
+.sidebar-brand:hover { color: #fff; }
 
 .sidebar-brand-dot {
   width: 6px;
