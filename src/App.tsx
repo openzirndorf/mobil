@@ -266,7 +266,7 @@ export default function App() {
   const [pois, setPois] = useState<Poi[]>([]);
   const [poisVisible, setPoisVisible] = useState({ park_ride: false, bicycle_parking: false, taxi: false, toilets: false });
   const [stopsVisible, setStopsVisible] = useState(true);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 640);
   const [zoom, setZoom] = useState(13);
   const [selectedBus, setSelectedBus] = useState<Bus | null>(null);
   const [selectedStop, setSelectedStop] = useState<{
@@ -601,7 +601,8 @@ export default function App() {
         onClick={() => setSidebarOpen((v) => !v)}
         title={sidebarOpen ? "Seitenleiste einklappen" : "Seitenleiste ausklappen"}
       >
-        {sidebarOpen ? "›" : "‹"}
+        <span className="sidebar-toggle-desktop">{sidebarOpen ? "›" : "‹"}</span>
+        <span className="sidebar-toggle-mobile">{sidebarOpen ? "▼ Schließen" : "▲ Linien & Abfahrten"}</span>
       </button>
 
       <aside className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sharepic – Zirndorf Mobil</title>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700;900&family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 1200px;
+      height: 630px;
+      font-family: 'Inter', sans-serif;
+      background: #006600;
+      display: flex;
+      align-items: stretch;
+      overflow: hidden;
+    }
+
+    /* Left: content */
+    .left {
+      width: 620px;
+      padding: 64px 56px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      background: linear-gradient(135deg, #007a00 0%, #004d00 100%);
+      position: relative;
+      z-index: 1;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .brand img {
+      width: 52px;
+      height: 52px;
+      border-radius: 10px;
+    }
+    .brand-text {
+      font-family: 'Montserrat', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.7);
+    }
+
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 16px;
+    }
+
+    .beta-pill {
+      display: inline-flex;
+      align-items: center;
+      background: #F59E0B;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 4px 12px;
+      border-radius: 100px;
+      width: fit-content;
+    }
+
+    h1 {
+      font-family: 'Montserrat', sans-serif;
+      font-size: 58px;
+      font-weight: 900;
+      color: #fff;
+      line-height: 1.05;
+    }
+    h1 span { color: #86efac; }
+
+    .tagline {
+      font-size: 18px;
+      color: rgba(255,255,255,0.8);
+      line-height: 1.5;
+      max-width: 420px;
+    }
+
+    .url {
+      font-size: 16px;
+      font-weight: 600;
+      color: #86efac;
+      letter-spacing: 0.02em;
+    }
+
+    /* Right: map-style panel */
+    .right {
+      flex: 1;
+      background: #e8f5e9;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Fake map grid lines */
+    .right::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,120,0,0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,120,0,0.08) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+
+    /* Fake railway line */
+    .rail {
+      position: absolute;
+      top: 50%;
+      left: -20px;
+      right: -20px;
+      height: 6px;
+      background: #15803d;
+      transform: rotate(-8deg) translateY(-40px);
+      border-radius: 3px;
+      box-shadow: 0 0 0 2px #fff;
+    }
+    .rail-2 {
+      top: 60%;
+      transform: rotate(5deg) translateY(20px);
+      background: #1d4ed8;
+      height: 5px;
+    }
+
+    /* Vehicle icons floating */
+    .vehicles {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+    }
+
+    .vehicle {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    .vehicle img { filter: drop-shadow(0 4px 8px rgba(0,0,0,0.25)); }
+
+    .v1 { top: 120px; left: 60px; }
+    .v2 { top: 180px; left: 200px; }
+    .v3 { top: 80px;  left: 310px; }
+    .v4 { top: 300px; left: 100px; }
+    .v5 { top: 350px; left: 260px; }
+
+    /* Pulse dot under vehicles */
+    .pulse {
+      width: 10px;
+      height: 10px;
+      background: #15803d;
+      border-radius: 50%;
+      box-shadow: 0 0 0 4px rgba(21,128,61,0.25);
+    }
+
+    /* Bottom icons row */
+    .bottom-row {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 14px 20px;
+      background: rgba(255,255,255,0.85);
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      backdrop-filter: blur(4px);
+    }
+    .bottom-row span {
+      font-size: 11px;
+      font-weight: 600;
+      color: #374151;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .bottom-row img { width: 22px; height: 22px; }
+  </style>
+</head>
+<body>
+
+  <div class="left">
+    <div class="brand">
+      <img src="../public/oz-logo.png" alt="OZ" />
+      <span class="brand-text">OpenZirndorf</span>
+    </div>
+
+    <div class="main">
+      <div class="beta-pill">Beta</div>
+      <h1>Zirndorf<br><span>Mobil</span></h1>
+      <p class="tagline">Busse &amp; Bahnen im Zirndorfer Raum – live auf der Karte, mit Echtzeit-Verspätungen.</p>
+    </div>
+
+    <div class="url">mobil.openzirndorf.de</div>
+  </div>
+
+  <div class="right">
+    <div class="rail"></div>
+    <div class="rail rail-2"></div>
+
+    <div class="vehicle v1">
+      <img src="../src/assets/bus.png" width="64" height="64" alt="Bus" />
+      <div class="pulse"></div>
+    </div>
+    <div class="vehicle v2">
+      <img src="../src/assets/sbahn.png" width="80" height="80" alt="S-Bahn" />
+      <div class="pulse" style="background:#1d4ed8; box-shadow: 0 0 0 4px rgba(29,78,216,0.25)"></div>
+    </div>
+    <div class="vehicle v3">
+      <img src="../src/assets/bus.png" width="56" height="56" alt="Bus" />
+      <div class="pulse"></div>
+    </div>
+    <div class="vehicle v4">
+      <img src="../src/assets/zug.png" width="80" height="80" alt="Zug" />
+      <div class="pulse" style="background:#7c3aed; box-shadow: 0 0 0 4px rgba(124,58,237,0.25)"></div>
+    </div>
+    <div class="vehicle v5">
+      <img src="../src/assets/bus.png" width="52" height="52" alt="Bus" />
+      <div class="pulse"></div>
+    </div>
+
+    <div class="bottom-row">
+      <span><img src="../src/assets/haltestelle.png" alt="" /> Haltestellen</span>
+      <span><img src="../src/assets/pr.png" alt="" /> P+R</span>
+      <span><img src="../src/assets/fahrrad.png" alt="" /> Fahrrad</span>
+      <span><img src="../src/assets/taxi.png" alt="" /> Taxi</span>
+      <span><img src="../src/assets/wc.png" alt="" /> WC</span>
+    </div>
+  </div>
+
+</body>
+</html>
