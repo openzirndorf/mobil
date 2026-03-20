@@ -566,6 +566,20 @@ export default function App() {
 
   const activeBuses = buses.filter((b) => b.position !== null);
 
+  const nextStopTime = (bus: Bus): Date | null => {
+    if (!bus.nextStop) return null;
+    const s = bus.stops.find((st) => st.name === bus.nextStop);
+    return s?.departureIst ?? s?.departureSoll ?? s?.arrivalIst ?? s?.arrivalSoll ?? null;
+  };
+
+  const fmtTime = (d: Date) => d.toLocaleTimeString("de", { hour: "2-digit", minute: "2-digit" });
+  const fmtNextStop = (d: Date) => {
+    const diffMin = (d.getTime() - Date.now()) / 60_000;
+    if (diffMin < 0) return null;
+    if (diffMin < 20) return `in ${Math.round(diffMin)} Min`;
+    return fmtTime(d);
+  };
+
   // Derive per-line delay hints from live data
   const lineDelayMap = new Map<string, number[]>();
   for (const bus of activeBuses) {
@@ -716,8 +730,9 @@ export default function App() {
                     <span className="line-type">{routeTypeLabel(info.type)}</span>
                   )}
                 </div>
-                <div className="delay" style={{ color: delayColor(bus.delayMinutes) }}>
-                  {delayLabel(bus.delayMinutes)}
+                <div className="delay">
+                  {(() => { const t = nextStopTime(bus); const s = t && fmtNextStop(t); return s ? <span className="next-stop-time">{s}</span> : null; })()}
+                  <span style={{ color: delayColor(bus.delayMinutes) }}>{delayLabel(bus.delayMinutes)}</span>
                 </div>
               </li>
             );
@@ -769,6 +784,16 @@ export default function App() {
               {info && (
                 <div className="trip-fullname">{info.name}</div>
               )}
+              {selectedBus.nextStop && (() => {
+                const t = nextStopTime(selectedBus);
+                return (
+                  <div className="trip-next-stop">
+                    <span className="trip-next-label">Nächste Haltestelle</span>
+                    <span className="trip-next-name">{selectedBus.nextStop}</span>
+                    {t && <span className="trip-next-time">{fmtTime(t)}</span>}
+                  </div>
+                );
+              })()}
               <div className="stop-list">
                 {selectedBus.stops.map((stop, i) => {
                   const time = stop.departureIst ?? stop.arrivalIst ?? stop.departureSoll;

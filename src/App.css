@@ -258,12 +258,57 @@ h1 {
   line-height: 1.4;
 }
 
+.trip-next-stop {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 5px 16px 6px;
+  background: var(--oz-bg-hover, #f5f7f5);
+  border-top: 1px solid var(--oz-border, #e2e8e2);
+  border-bottom: 1px solid var(--oz-border, #e2e8e2);
+  flex-wrap: wrap;
+}
+.trip-next-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--oz-text-secondary);
+  flex-shrink: 0;
+}
+.trip-next-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trip-next-time {
+  font-size: 0.82rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--oz-primary, #166534);
+  flex-shrink: 0;
+}
+
 .delay {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
   font-size: 0.72rem;
   font-weight: 700;
   flex-shrink: 0;
   min-width: 52px;
   text-align: right;
+}
+
+.next-stop-time {
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--oz-text);
 }
 
 /* ── Trip detail ──────────────────────────────────────────────────────────── */
