@@ -1,7 +1,7 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, refreshPositions, stopInZirndorf } from "./api";
+import { enrichBusDelays, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, refreshPositions, stopInZirndorf } from "./api";
 import {
   buildCoordRanges,
   loadGtfsData,
@@ -317,7 +317,8 @@ export default function App() {
 
   // ── Load GTFS data ──────────────────────────────────────────────────────────
   useEffect(() => {
-    loadGtfsData().then((data) => { setGtfs(data); gtfsRef.current = data; });
+    loadGtfsData((partial) => { setGtfs(partial); gtfsRef.current = partial; })
+      .then((full) => { setGtfs(full); gtfsRef.current = full; });
   }, []);
 
   // ── Fetch P+R and bicycle parking from Overpass ──────────────────────────────
@@ -411,11 +412,16 @@ export default function App() {
       const now = Date.now();
       const threshold = now - REFRESH_INTERVAL_MS * 1.5;
       for (const b of fresh) busLastSeenRef.current.set(b.tripId, now);
-      setBuses((prev) => {
-        const freshMap = new Map(fresh.map((b) => [b.tripId, b]));
-        const kept = prev.filter((b) => !freshMap.has(b.tripId) && (busLastSeenRef.current.get(b.tripId) ?? 0) > threshold);
-        return [...fresh, ...kept];
-      });
+      const mergeBuses = (base: Bus[], updated: Bus[]) => {
+        const updatedMap = new Map(updated.map((b) => [b.tripId, b]));
+        const kept = base.filter((b) => !updatedMap.has(b.tripId) && (busLastSeenRef.current.get(b.tripId) ?? 0) > threshold);
+        return [...updated, ...kept];
+      };
+      setBuses((prev) => mergeBuses(prev, fresh));
+      // Enrich with delays in background – doesn't block initial render
+      enrichBusDelays(fresh).then((enriched) => {
+        setBuses((prev) => mergeBuses(prev, enriched));
+      }).catch(() => {});
       setLastUpdate(new Date());
       setError(null);
     } catch {

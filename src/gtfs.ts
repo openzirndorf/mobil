@@ -33,13 +33,106 @@ export interface GtfsData {
   routeShapes: Record<string, GtfsRouteShape>;
 }
 
+// ── IndexedDB helpers ─────────────────────────────────────────────────────────
+
+const IDB_NAME = "trafficmap-v2";
+const IDB_STORE = "gtfs";
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGet<T>(db: IDBDatabase, key: string): Promise<T | null> {
+  return new Promise((resolve) => {
+    const req = db.transaction(IDB_STORE).objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve((req.result as T) ?? null);
+    req.onerror = () => resolve(null);
+  });
+}
+
+function idbSet(db: IDBDatabase, key: string, data: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(data, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ── Partial types for split files ─────────────────────────────────────────────
+
+interface GtfsStopsFile {
+  generated: string;
+  stopsByVgnId: GtfsData["stopsByVgnId"];
+  lineInfo: GtfsData["lineInfo"];
+}
+
+interface GtfsRoutesFile {
+  generated: string;
+  routeShapes: GtfsData["routeShapes"];
+}
+
+// ── Stale-while-revalidate fetch helper ───────────────────────────────────────
+
+async function swrFetch<T extends { generated: string }>(
+  db: IDBDatabase | null,
+  idbKey: string,
+  url: string,
+  onFresh: (data: T) => void,
+): Promise<T> {
+  const cached = db ? await idbGet<T>(db, idbKey) : null;
+
+  const networkFetch = fetch(url)
+    .then((r) => r.json() as Promise<T>)
+    .then(async (fresh) => {
+      if (db && fresh.generated !== cached?.generated) {
+        await idbSet(db, idbKey, fresh).catch(() => {});
+      }
+      return fresh;
+    });
+
+  if (cached) {
+    networkFetch.then((fresh) => {
+      if (fresh.generated !== cached.generated) onFresh(fresh);
+    }).catch(() => {});
+    return cached;
+  }
+
+  return networkFetch;
+}
+
+// ── Loader (progressive: stops first, routes in background) ──────────────────
+
 let _cache: GtfsData | null = null;
 
-export async function loadGtfsData(): Promise<GtfsData> {
+export async function loadGtfsData(onPartial?: (data: GtfsData) => void): Promise<GtfsData> {
   if (_cache) return _cache;
-  const res = await fetch("/gtfs_data.json", { cache: "no-cache" });
-  _cache = await res.json();
-  return _cache!;
+
+  let db: IDBDatabase | null = null;
+  try { db = await openDb(); } catch { /* IDB unavailable (private mode etc.) */ }
+
+  // Load stops file immediately (small – ~50 KB)
+  const stops = await swrFetch<GtfsStopsFile>(db, "stops", "/gtfs_stops.json", (fresh) => {
+    if (_cache) _cache = { ..._cache, ...fresh };
+  });
+
+  // Return partial data to caller so map can render stop markers right away
+  const partial: GtfsData = { ...stops, routeShapes: {} };
+  _cache = partial;
+  onPartial?.(partial);
+
+  // Load routes file in parallel (large – ~960 KB, from IDB if cached)
+  const routes = await swrFetch<GtfsRoutesFile>(db, "routes", "/gtfs_routes.json", (fresh) => {
+    if (_cache) { _cache = { ..._cache, ...fresh }; onPartial?.(_cache); }
+  });
+
+  _cache = { ...stops, ...routes };
+  return _cache;
 }
 
 // ── Shape matching ────────────────────────────────────────────────────────────

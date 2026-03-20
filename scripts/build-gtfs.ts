@@ -9,9 +9,6 @@
 import fs from "fs";
 import path from "path";
 import https from "https";
-import zlib from "zlib";
-import { createReadStream } from "fs";
-import { pipeline } from "stream/promises";
 
 // ── tiny CSV parser ───────────────────────────────────────────────────────────
 function* parseCsv(content: string): Generator<Record<string, string>> {
@@ -235,10 +232,17 @@ async function railwayRoute(
 
 const GTFS_URL = "https://www.vgn.de/opendata/GTFS.zip";
 const GTFS_CACHE = "/tmp/vgn_gtfs_cache.zip";
+const OUT_STOPS = path.resolve("public/gtfs_stops.json");
+const OUT_ROUTES = path.resolve("public/gtfs_routes.json");
+// Keep legacy file for IDB cache invalidation check during migration
 const OUT_FILE = path.resolve("public/gtfs_data.json");
 
-// Bounding box: Zirndorf Gemeindegebiet + S-Bahn Außenorte
-const BBOX = { latMin: 49.39, latMax: 49.51, lngMin: 10.89, lngMax: 11.02 };
+// Extra via-points injected between specific stops to correct BRouter routing
+const ROUTE_VIA: Record<string, Array<{ afterStop: string; via: Array<{ lat: number; lng: number }> }>> = {
+  // N8 dir=0 (Nürnberg→Bronnamberg): Landratsamt → Vogelherdstr → Am Grasweg
+  // BRouter sonst via Schwabacher Str, die N8 fährt aber durch die Vogelherdstr
+  "16-Y08-j26-1__0": [{ afterStop: "Zirndorf Landratsamt", via: [{ lat: 49.4409, lng: 10.9514 }] }],
+};
 
 // Lines we want to pre-route (serve Zirndorf area)
 const TARGET_LINES = new Set([
@@ -389,8 +393,9 @@ async function main() {
   console.log("🛣  Pre-routing variants via OSRM (slow – only runs once)…");
 
   let existingShapes: Record<string, { coords: Array<[number, number]> }> = {};
-  if (fs.existsSync(OUT_FILE)) {
-    try { existingShapes = JSON.parse(fs.readFileSync(OUT_FILE, "utf8")).routeShapes ?? {}; } catch {}
+  const cacheFile = fs.existsSync(OUT_ROUTES) ? OUT_ROUTES : OUT_FILE;
+  if (fs.existsSync(cacheFile)) {
+    try { existingShapes = JSON.parse(fs.readFileSync(cacheFile, "utf8")).routeShapes ?? {}; } catch {}
   }
 
   const routeShapes: Record<
@@ -433,12 +438,25 @@ async function main() {
         coords = await railwayRoute(waypoints);
         if (coords.length < 2) coords = waypoints.map((w) => [w.lat, w.lng]);
       }
-    } else if (existingShapes[key]?.coords?.length > waypoints.length * 3) {
+    } else if (existingShapes[key]?.coords?.length > waypoints.length * 3 && !ROUTE_VIA[key]) {
       coords = existingShapes[key].coords;
       console.log(`  [${++done}/${Object.keys(routeVariants).length}] ${route.line} dir=${trip.direction} (cached)`);
     } else {
-      console.log(`  [${++done}/${Object.keys(routeVariants).length}] ${route.line} dir=${trip.direction} "${trip.headsign}" (${waypoints.length} stops)`);
-      coords = await osrmRoute(waypoints);
+      // Inject manual via-points between specific stops to correct auto-routing
+      let enrichedWaypoints = waypoints;
+      const viaRules = ROUTE_VIA[key];
+      if (viaRules) {
+        enrichedWaypoints = [];
+        for (let i = 0; i < waypoints.length; i++) {
+          enrichedWaypoints.push(waypoints[i]);
+          const stopName = variant.stopIds[i] ? stops[variant.stopIds[i]]?.name : undefined;
+          for (const rule of viaRules) {
+            if (stopName === rule.afterStop) enrichedWaypoints.push(...rule.via);
+          }
+        }
+      }
+      console.log(`  [${++done}/${Object.keys(routeVariants).length}] ${route.line} dir=${trip.direction} "${trip.headsign}" (${enrichedWaypoints.length} pts)`);
+      coords = await osrmRoute(enrichedWaypoints);
     }
 
     routeShapes[key] = {
@@ -466,31 +484,27 @@ async function main() {
     stopsByVgnId[s.vgnId] = { name: s.name, lat: s.lat, lng: s.lng };
   }
 
-  const output = {
-    generated: new Date().toISOString(),
-    gtfsSource: GTFS_URL,
-    stopsByVgnId,
+  const generated = new Date().toISOString();
 
-    // Route metadata: line → {name, type, desc}
-    lineInfo: Object.fromEntries(
-      Object.values(routes)
-        .filter((r) => TARGET_LINES.has(r.line))
-        .map((r) => [r.line, { name: r.name, type: r.type, desc: r.desc }])
-        // Deduplicate by line name
-        .filter(([line], i, arr) => arr.findIndex(([l]) => l === line) === i)
-    ) as Record<string, { name: string; type: number; desc: string }>,
+  const lineInfo = Object.fromEntries(
+    Object.values(routes)
+      .filter((r) => TARGET_LINES.has(r.line))
+      .map((r) => [r.line, { name: r.name, type: r.type, desc: r.desc }])
+      .filter(([line], i, arr) => arr.findIndex(([l]) => l === line) === i)
+  ) as Record<string, { name: string; type: number; desc: string }>;
 
-    // Pre-routed shapes: "routeId__direction" → coords
-    routeShapes,
-  };
+  const stopsOutput = { generated, gtfsSource: GTFS_URL, stopsByVgnId, lineInfo };
+  const routesOutput = { generated, routeShapes };
 
   fs.mkdirSync("public", { recursive: true });
-  fs.writeFileSync(OUT_FILE, JSON.stringify(output));
-  const kb = Math.round(fs.statSync(OUT_FILE).size / 1024);
-  console.log(`\n✅ Written ${OUT_FILE} (${kb} KB)`);
-  console.log(`   ${Object.keys(output.stopsByVgnId).length} stops`);
-  console.log(`   ${Object.keys(output.lineInfo).length} lines`);
-  console.log(`   ${Object.keys(output.routeShapes).length} route shapes`);
+  fs.writeFileSync(OUT_STOPS, JSON.stringify(stopsOutput));
+  fs.writeFileSync(OUT_ROUTES, JSON.stringify(routesOutput));
+  // Keep legacy file for clients still holding an old IDB cache (can be removed after one release cycle)
+  fs.writeFileSync(OUT_FILE, JSON.stringify({ ...stopsOutput, routeShapes }));
+
+  console.log(`\n✅ Written:`);
+  console.log(`   ${OUT_STOPS} (${Math.round(fs.statSync(OUT_STOPS).size / 1024)} KB) – ${Object.keys(stopsByVgnId).length} stops, ${Object.keys(lineInfo).length} lines`);
+  console.log(`   ${OUT_ROUTES} (${Math.round(fs.statSync(OUT_ROUTES).size / 1024)} KB) – ${Object.keys(routeShapes).length} route shapes`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

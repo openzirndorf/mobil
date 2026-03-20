@@ -439,15 +439,20 @@ async function findScheduledBuses(gtfs: GtfsData, now: Date): Promise<Bus[]> {
     }
   }
 
-  // Enrich each bus with real delay from DB REST API
-  const enriched = await Promise.all(buses.map(async (bus) => {
-    // Use the nearest upcoming Zirndorf-area stop as reference (shared across trips → cache hits)
+  return buses.filter((b) => b.position !== null);
+}
+
+// ── Delay enrichment (off critical path) ──────────────────────────────────────
+
+export async function enrichBusDelays(buses: Bus[]): Promise<Bus[]> {
+  const now = new Date();
+  return Promise.all(buses.map(async (bus) => {
     const refStop =
       bus.stops.find((s) => stopInZirndorf(s.lat, s.lng) && s.departureSoll != null && s.departureSoll >= now) ??
       bus.stops.find((s) => stopInZirndorf(s.lat, s.lng)) ??
       bus.stops[0];
 
-    const refDep = refStop.departureSoll ?? refStop.arrivalSoll;
+    const refDep = refStop?.departureSoll ?? refStop?.arrivalSoll;
     if (!refDep) return bus;
 
     const stopId = await lookupDbStopId(refStop.lat, refStop.lng);
@@ -474,8 +479,6 @@ async function findScheduledBuses(gtfs: GtfsData, now: Date): Promise<Bus[]> {
       segmentT: pos?.segmentT ?? bus.segmentT,
     };
   }));
-
-  return enriched.filter((b) => b.position !== null);
 }
 
 function rebuildTripFromGtfs(
