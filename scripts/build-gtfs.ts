@@ -75,32 +75,23 @@ function download(url: string, dest: string): Promise<void> {
   });
 }
 
-// ── OSRM routing (foot profile, segment by segment) ──────────────────────────
-const OSRM = "https://router.project-osrm.org/route/v1/driving";
+// ── BRouter routing (car-fast profile, all stops at once) ────────────────────
+const BROUTER = "https://brouter.de/brouter";
 async function osrmRoute(
   stops: Array<{ lat: number; lng: number }>
 ): Promise<Array<[number, number]>> {
-  // Route segment by segment, concatenate
-  const allCoords: Array<[number, number]> = [];
-  for (let i = 0; i < stops.length - 1; i++) {
-    const a = stops[i], b = stops[i + 1];
-    const url = `${OSRM}/${a.lng},${a.lat};${b.lng},${b.lat}?overview=full&geometries=geojson`;
-    try {
-      const data = await fetch(url).then((r) => r.json()) as any;
-      const coords: [number, number][] = data.routes[0].geometry.coordinates.map(
-        ([lng, lat]: [number, number]) => [lat, lng] as [number, number]
-      );
-      if (i === 0) allCoords.push(...coords);
-      else allCoords.push(...coords.slice(1)); // avoid duplicating junction point
-    } catch {
-      // fallback: straight line
-      if (i === 0) allCoords.push([a.lat, a.lng]);
-      allCoords.push([b.lat, b.lng]);
-    }
-    // Rate-limit: tiny pause
-    await new Promise((r) => setTimeout(r, 80));
+  const lonlats = stops.map((s) => `${s.lng},${s.lat}`).join("|");
+  const url = `${BROUTER}?lonlats=${lonlats}&profile=car-fast&alternativeidx=0&format=geojson`;
+  try {
+    const data = await fetch(url).then((r) => r.json()) as any;
+    const coords: [number, number][] = data.features[0].geometry.coordinates.map(
+      ([lng, lat]: [number, number, number?]) => [lat, lng] as [number, number]
+    );
+    return coords;
+  } catch {
+    // fallback: straight line between stops
+    return stops.map((s) => [s.lat, s.lng]);
   }
-  return allCoords;
 }
 
 // ── Overpass railway routing (one query per route, BFS through OSM graph) ─────
@@ -251,8 +242,8 @@ const BBOX = { latMin: 49.39, latMax: 49.51, lngMin: 10.89, lngMax: 11.02 };
 
 // Lines we want to pre-route (serve Zirndorf area)
 const TARGET_LINES = new Set([
-  "70", "72", "112", "113", "150", "151", "152", "154",
-  "70E", "72E", "RB11", "RB 11", "S4",
+  "70", "71", "72", "112", "113", "150", "151", "152", "154", "155",
+  "70E", "72E", "713", "N8", "N21", "N24", "RB11", "RB 11", "RE 90", "S4",
 ]);
 
 async function main() {
@@ -442,7 +433,7 @@ async function main() {
         coords = await railwayRoute(waypoints);
         if (coords.length < 2) coords = waypoints.map((w) => [w.lat, w.lng]);
       }
-    } else if (existingShapes[key]?.coords?.length) {
+    } else if (existingShapes[key]?.coords?.length > waypoints.length * 3) {
       coords = existingShapes[key].coords;
       console.log(`  [${++done}/${Object.keys(routeVariants).length}] ${route.line} dir=${trip.direction} (cached)`);
     } else {

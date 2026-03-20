@@ -274,7 +274,7 @@ function interpolatePosition(
   // Bus approaching first stop (within 30 min before departure)
   const first = stops[0];
   const firstDep = first.departureSoll ?? first.departureIst;
-  if (firstDep && now < firstDep && firstDep.getTime() - now.getTime() < 30 * 60_000) {
+  if (firstDep && now < firstDep && firstDep.getTime() - now.getTime() < 7 * 60_000) {
     return {
       lat: first.lat, lng: first.lng,
       segmentIndex: 0, segmentT: 0,
