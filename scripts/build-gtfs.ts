@@ -237,11 +237,21 @@ const OUT_ROUTES = path.resolve("public/gtfs_routes.json");
 // Keep legacy file for IDB cache invalidation check during migration
 const OUT_FILE = path.resolve("public/gtfs_data.json");
 
-// Extra via-points injected between specific stops to correct BRouter routing
+// Extra via-points injected between specific stops to correct BRouter routing.
+// Keyed by `${line}__${direction}` (stable across GTFS updates, unlike route_id).
 const ROUTE_VIA: Record<string, Array<{ afterStop: string; via: Array<{ lat: number; lng: number }> }>> = {
   // N8 dir=0 (Nürnberg→Bronnamberg): Landratsamt → Vogelherdstr → Am Grasweg
-  // BRouter sonst via Schwabacher Str, die N8 fährt aber durch die Vogelherdstr
-  "16-Y08-j26-1__0": [{ afterStop: "Zirndorf Landratsamt", via: [{ lat: 49.4409, lng: 10.9514 }] }],
+  // BRouter routet sonst via Schwabacher Str; N8 fährt aber durch Vogelherdstr
+  // N8 dir=0 (Nürnberg→Bronnamberg): Vogelherdstr hat oneway=yes (südwärts) im Nordabschnitt.
+  // Via-Punkt auf exaktem OSM-Knoten des bidirektionalen Südabschnitts (way 23156774),
+  // damit BRouter nicht via Schwabacher Str ausweicht.
+  "N8__0": [
+    { afterStop: "Zirndorf Landratsamt", via: [{ lat: 49.440382, lng: 10.951868 }] },
+  ],
+  // N8 dir=1 (Bronnamberg→Nürnberg)
+  "N8__1": [
+    { afterStop: "Zirndorf Am Grasweg", via: [{ lat: 49.440382, lng: 10.951868 }] },
+  ],
 };
 
 // Lines we want to pre-route (serve Zirndorf area)
@@ -438,13 +448,13 @@ async function main() {
         coords = await railwayRoute(waypoints);
         if (coords.length < 2) coords = waypoints.map((w) => [w.lat, w.lng]);
       }
-    } else if (existingShapes[key]?.coords?.length > waypoints.length * 3 && !ROUTE_VIA[key]) {
+    } else if (existingShapes[key]?.coords?.length > waypoints.length * 3 && !ROUTE_VIA[`${route.line}__${trip.direction}`]) {
       coords = existingShapes[key].coords;
       console.log(`  [${++done}/${Object.keys(routeVariants).length}] ${route.line} dir=${trip.direction} (cached)`);
     } else {
       // Inject manual via-points between specific stops to correct auto-routing
       let enrichedWaypoints = waypoints;
-      const viaRules = ROUTE_VIA[key];
+      const viaRules = ROUTE_VIA[`${route.line}__${trip.direction}`];
       if (viaRules) {
         enrichedWaypoints = [];
         for (let i = 0; i < waypoints.length; i++) {
@@ -476,13 +486,29 @@ async function main() {
   }
 
   // 8. Build final output
-  // Collect unique VGN stops from all used stop_ids (one entry per VGN ID)
-  const stopsByVgnId: Record<string, { name: string; lat: number; lng: number }> = {};
+  // Collect all Steige per VGN ID (each platform as a separate position)
+  const vgnIdGroups: Record<string, { name: string; positions: Array<{ lat: number; lng: number }> }> = {};
   for (const stopId of usedStopIds) {
     const s = stops[stopId];
-    if (!s?.vgnId || stopsByVgnId[s.vgnId]) continue;
-    stopsByVgnId[s.vgnId] = { name: s.name, lat: s.lat, lng: s.lng };
+    if (!s?.vgnId) continue;
+    if (!vgnIdGroups[s.vgnId]) vgnIdGroups[s.vgnId] = { name: s.name, positions: [] };
+    const existing = vgnIdGroups[s.vgnId].positions;
+    // Deduplicate identical coordinates (different stop_ids can share a position)
+    if (!existing.some((p) => p.lat === s.lat && p.lng === s.lng)) {
+      existing.push({ lat: s.lat, lng: s.lng });
+    }
   }
+  const stopsByVgnId = Object.fromEntries(
+    Object.entries(vgnIdGroups).map(([vgnId, { name, positions }]) => [
+      vgnId,
+      {
+        name,
+        lat: positions[0].lat,
+        lng: positions[0].lng,
+        steige: positions.length > 1 ? positions : undefined,
+      },
+    ])
+  );
 
   const generated = new Date().toISOString();
 

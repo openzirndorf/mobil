@@ -4,6 +4,8 @@ export interface GtfsStop {
   name: string;
   lat: number;
   lng: number;
+  /** All individual platform positions (Steige) for this stop */
+  steige?: Array<{ lat: number; lng: number }>;
 }
 
 export interface GtfsLineInfo {

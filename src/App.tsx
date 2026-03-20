@@ -231,16 +231,47 @@ function makeStopIcon(isZirndorf = false, zoom = 13): L.DivIcon {
 
 // ── POI icons ─────────────────────────────────────────────────────────────────
 
-interface Poi { lat: number; lng: number; name: string; type: "park_ride" | "bicycle_parking" | "taxi" | "toilets"; }
+interface Poi {
+  lat: number;
+  lng: number;
+  name: string;
+  type: "park_ride" | "bicycle_parking" | "taxi" | "toilets";
+  toiletType?: "permanent" | "chemical" | "unknown";
+  fee?: boolean;
+}
+
+function detectToiletType(tags: Record<string, string>): "permanent" | "chemical" | "unknown" {
+  const disposal = tags["toilets:disposal"];
+  const temporary = tags["temporary"];
+  const operator = (tags["operator"] ?? "").toLowerCase();
+  const building = tags["building"];
+  if (disposal === "chemical" || temporary === "yes" || operator.includes("toi") || operator.includes("dixi") || operator.includes("wc box") || disposal === "pitlatrine") {
+    return "chemical";
+  }
+  if (disposal === "flush" || building === "yes" || building === "toilets") {
+    return "permanent";
+  }
+  return "unknown";
+}
+
+function toiletDisplayName(tags: Record<string, string>, toiletType: "permanent" | "chemical" | "unknown"): string {
+  const base = tags.name ?? (toiletType === "chemical" ? "Chemietoilette (Dixi)" : "Öffentliche Toilette");
+  const fee = tags.fee === "yes";
+  return fee ? `${base} (kostenpflichtig)` : base;
+}
 
 const POI_SIZE = 36;
 const POI_SIZE_BIKE = Math.round(POI_SIZE * 0.95);
 
-function makePoiIcon(type: Poi["type"]): L.DivIcon {
+function makePoiIcon(type: Poi["type"], toiletType?: Poi["toiletType"]): L.DivIcon {
   const src = type === "taxi" ? taxiImgUrl : type === "park_ride" ? prImgUrl : type === "toilets" ? wcImgUrl : fahrradImgUrl;
   const s = type === "bicycle_parking" ? POI_SIZE_BIKE : POI_SIZE;
+  // Chemical toilets (Dixi) get an orange tint to distinguish them
+  const filter = type === "toilets" && toiletType === "chemical"
+    ? "drop-shadow(0 2px 5px rgba(0,0,0,0.45)) sepia(1) saturate(3) hue-rotate(350deg)"
+    : "drop-shadow(0 2px 5px rgba(0,0,0,0.45))";
   const html = `
-    <div style="display:flex;flex-direction:column;align-items:center;filter:drop-shadow(0 2px 5px rgba(0,0,0,0.45));">
+    <div style="display:flex;flex-direction:column;align-items:center;filter:${filter};">
       <img src="${src}" width="${s}" height="${s}" style="display:block;" />
     </div>`;
   return L.divIcon({ className: "", html, iconAnchor: [s / 2, s] });
@@ -339,12 +370,23 @@ export default function App() {
             const acc = el.tags?.access;
             return !acc || !["private", "customers", "no"].includes(acc);
           })
-          .map((el) => ({
-            lat: el.lat ?? el.center?.lat ?? 0,
-            lng: el.lon ?? el.center?.lon ?? 0,
-            name: el.tags?.name ?? (el.tags?.amenity === "bicycle_parking" ? "Fahrradabstellplatz" : el.tags?.amenity === "taxi" ? "Taxistand" : el.tags?.amenity === "toilets" ? "Öffentliche Toilette" : "P+R Parkplatz"),
-            type: (el.tags?.amenity === "bicycle_parking" ? "bicycle_parking" : el.tags?.amenity === "taxi" ? "taxi" : el.tags?.amenity === "toilets" ? "toilets" : "park_ride") as Poi["type"],
-          }))
+          .map((el) => {
+            const tags = el.tags ?? {};
+            const amenity = tags.amenity;
+            const type = (amenity === "bicycle_parking" ? "bicycle_parking" : amenity === "taxi" ? "taxi" : amenity === "toilets" ? "toilets" : "park_ride") as Poi["type"];
+            const toiletType = type === "toilets" ? detectToiletType(tags) : undefined;
+            const name = type === "toilets"
+              ? toiletDisplayName(tags, toiletType!)
+              : (tags.name ?? (amenity === "bicycle_parking" ? "Fahrradabstellplatz" : amenity === "taxi" ? "Taxistand" : "P+R Parkplatz"));
+            return {
+              lat: el.lat ?? el.center?.lat ?? 0,
+              lng: el.lon ?? el.center?.lon ?? 0,
+              name,
+              type,
+              toiletType,
+              fee: tags.fee === "yes",
+            };
+          })
           .filter((p) => p.lat && p.lng)
         );
       })
@@ -360,23 +402,26 @@ export default function App() {
     stopLayerRef.current.addTo(map);
 
     for (const [vgnId, stop] of Object.entries(gtfs.stopsByVgnId)) {
-      const isZirn = stopInZirndorf(stop.lat, stop.lng);
       const vgnIdNum = parseInt(vgnId);
-      L.marker([stop.lat, stop.lng], {
-        icon: makeStopIcon(isZirn, zoom),
-        zIndexOffset: isZirn ? 0 : -200,
-      })
-        .bindTooltip(stop.name, { direction: "top", offset: [0, -6] })
-        .on("click", () => {
-          setSelectedBus(null);
-          setSelectedStop({ vgnId: vgnIdNum, name: stop.name, loading: true, departures: [] });
-          fetchStopDepartures(vgnIdNum).then((result) => {
-            setSelectedStop({ vgnId: vgnIdNum, name: stop.name, loading: false, departures: result.departures });
-          }).catch(() => {
-            setSelectedStop((prev) => prev?.vgnId === vgnIdNum ? { ...prev, loading: false } : prev);
-          });
+      const positions = stop.steige ?? [{ lat: stop.lat, lng: stop.lng }];
+      for (const pos of positions) {
+        const isZirn = stopInZirndorf(pos.lat, pos.lng);
+        L.marker([pos.lat, pos.lng], {
+          icon: makeStopIcon(isZirn, zoom),
+          zIndexOffset: isZirn ? 0 : -200,
         })
-        .addTo(stopLayerRef.current!);
+          .bindTooltip(stop.name, { direction: "top", offset: [0, -6] })
+          .on("click", () => {
+            setSelectedBus(null);
+            setSelectedStop({ vgnId: vgnIdNum, name: stop.name, loading: true, departures: [] });
+            fetchStopDepartures(vgnIdNum).then((result) => {
+              setSelectedStop({ vgnId: vgnIdNum, name: stop.name, loading: false, departures: result.departures });
+            }).catch(() => {
+              setSelectedStop((prev) => prev?.vgnId === vgnIdNum ? { ...prev, loading: false } : prev);
+            });
+          })
+          .addTo(stopLayerRef.current!);
+      }
     }
   }, [gtfs, stops, zoom, stopsVisible]);
 
@@ -393,7 +438,7 @@ export default function App() {
     poiLayerRef.current.addTo(map);
     for (const poi of pois) {
       if (!poisVisible[poi.type]) continue;
-      L.marker([poi.lat, poi.lng], { icon: makePoiIcon(poi.type), zIndexOffset: 200 })
+      L.marker([poi.lat, poi.lng], { icon: makePoiIcon(poi.type, poi.toiletType), zIndexOffset: 200 })
         .bindTooltip(poi.name, { direction: "top", offset: [0, -8] })
         .addTo(poiLayerRef.current);
     }
