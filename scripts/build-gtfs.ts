@@ -258,6 +258,8 @@ const ROUTE_VIA: Record<string, Array<{ afterStop: string; via: Array<{ lat: num
 const TARGET_LINES = new Set([
   "70", "71", "72", "112", "113", "150", "151", "152", "154", "155",
   "70E", "72E", "713", "N8", "N21", "N24", "RB11", "RB 11", "RE 90", "S4",
+  // Additional lines serving the Zirndorf area
+  "114", "N7", "178", "126", "63", "64",
 ]);
 
 async function main() {
