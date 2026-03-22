@@ -590,6 +590,17 @@ h1 {
   margin-top: 2px;
 }
 .disruption-link:hover { text-decoration: underline; }
+.disruption-line-badge {
+  display: inline-block;
+  background: #92400E;
+  color: #FFF;
+  font-weight: 700;
+  font-size: 0.68rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-bottom: 2px;
+  align-self: flex-start;
+}
 
 /* ── Loading overlay ──────────────────────────────────────────────────────── */
 .loading-overlay {

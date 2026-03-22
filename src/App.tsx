@@ -1,7 +1,7 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { enrichBusDelays, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, refreshPositions, stopInZirndorf } from "./api";
+import { enrichBusDelays, evictSegmentCache, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, refreshPositions, stopInZirndorf } from "./api";
 import {
   buildCoordRanges,
   loadGtfsData,
@@ -29,6 +29,36 @@ L.Icon.Default.mergeOptions({
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
+
+// ── Static disruption notices ─────────────────────────────────────────────────
+
+interface StaticNotice {
+  from: string; // ISO datetime, local time (Europe/Berlin)
+  to: string;
+  lines: string[];
+  text: string;
+  /** Stop name substrings to remove from bus.stops before OSRM routing (all directions) */
+  cancelledStops?: string[];
+  /** Additional cancellations when bus.direction contains the given substring */
+  cancelledStopsByDirection?: Record<string, string[]>;
+}
+
+const STATIC_NOTICES: StaticNotice[] = [
+  {
+    from: "2026-03-22T10:00:00",
+    to:   "2026-03-22T21:00:00",
+    lines: ["70"],
+    text: "Frühlingsmarkt Zirndorf: Linie 70 fährt zwischen Kraftstraße und Am Grasweg über die Albert-Einstein-Straße. Haltestellen Bahnhof (Fürther Str.) und Marktplatz entfallen – Ersatzhalt direkt vor dem Bahnhof.",
+    cancelledStops: ["Marktplatz"],
+    // Richtung Nürnberg: auch Landratsamt entfällt (liegt auf dem gesperrten Abschnitt)
+    cancelledStopsByDirection: { "Gustav-Adolf": ["Landratsamt"] },
+  },
+];
+
+function activeNotices(): StaticNotice[] {
+  const now = new Date();
+  return STATIC_NOTICES.filter((n) => now >= new Date(n.from) && now <= new Date(n.to));
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -290,6 +320,8 @@ export default function App() {
   const shapeRangesRef = useRef<Map<number, { shape: GtfsRouteShape; ranges: number[] }>>(new Map());
   // OSRM fallback segments for buses without a matching GTFS shape
   const osrmSegmentsRef = useRef<Map<number, [number, number][][]>>(new Map());
+  // Trips already routed with correct detour stops (to avoid re-clearing on every tick)
+  const detourRoutedRef = useRef<Set<number>>(new Set());
 
   const [stops, setStops] = useState<Stop[]>([]);
   const [buses, setBuses] = useState<Bus[]>([]);
@@ -509,8 +541,19 @@ export default function App() {
       if (!bus.position) continue;
       const color = delayColor(bus.delayMinutes);
 
+      // Lines with active static notices use OSRM (detour) instead of pre-built GTFS shape
+      const onDetour = staticNotices.some(n => n.lines.includes(bus.line));
+      if (bus.line === "70") console.log("[70]", bus.tripId, "onDetour:", onDetour, "notices:", staticNotices.length, "stops:", bus.stops.map(s => s.name).join(", "));
+
+      // First time we see a detour trip: clear any stale cached routes
+      if (onDetour && !detourRoutedRef.current.has(bus.tripId)) {
+        shapeRangesRef.current.delete(bus.tripId);
+        osrmSegmentsRef.current.delete(bus.tripId);
+        evictSegmentCache(bus.tripId);
+      }
+
       // ── Match GTFS shape (once per trip) ────────────────────────────────────
-      if (gtfs && !shapeRangesRef.current.has(bus.tripId)) {
+      if (gtfs && !shapeRangesRef.current.has(bus.tripId) && !onDetour) {
         const shape = matchShapeForBus(bus.line, bus.direction, bus.stops, gtfs);
         if (shape) {
           shapeRangesRef.current.set(bus.tripId, { shape, ranges: buildCoordRanges(shape) });
@@ -522,9 +565,25 @@ export default function App() {
           });
         }
       }
+      if (onDetour && !osrmSegmentsRef.current.has(bus.tripId)) {
+        const notice = staticNotices.find(n => n.lines.includes(bus.line))!;
+        const cancelledForDir = Object.entries(notice.cancelledStopsByDirection ?? {})
+          .filter(([dir]) => bus.direction.includes(dir))
+          .flatMap(([, stops]) => stops);
+        const allCancelled = [...(notice.cancelledStops ?? []), ...cancelledForDir];
+        const detourStops = allCancelled.length > 0
+          ? bus.stops.filter(s => !allCancelled.some(c => s.name.includes(c)))
+          : bus.stops;
+        console.log(`[detour ${bus.line} dir="${bus.direction}"] cancelled:`, allCancelled, "stops:", detourStops.map(s => s.name));
+        fetchRoadSegments(bus.tripId, detourStops).then((segs) => {
+          osrmSegmentsRef.current.set(bus.tripId, segs);
+          detourRoutedRef.current.add(bus.tripId);
+          routeLinesRef.current.get(bus.tripId)?.setLatLngs(segs.flat());
+        });
+      }
 
       // ── Compute route coords (GTFS shape trimmed to this bus's stops) ────────
-      const gtfsCachedRoute = shapeRangesRef.current.get(bus.tripId);
+      const gtfsCachedRoute = onDetour ? undefined : shapeRangesRef.current.get(bus.tripId);
       let routeCoords: [number, number][];
       if (gtfsCachedRoute) {
         const { shape, ranges } = gtfsCachedRoute;
@@ -554,7 +613,7 @@ export default function App() {
       let displayLng = bus.position.lng;
       let bearing = bus.bearing;
 
-      const gtfsCached = shapeRangesRef.current.get(bus.tripId);
+      const gtfsCached = onDetour ? undefined : shapeRangesRef.current.get(bus.tripId);
       const osrmSegs = osrmSegmentsRef.current.get(bus.tripId);
 
       if (gtfsCached) {
@@ -635,6 +694,7 @@ export default function App() {
     .map(([line, delays]) => ({ line, avg: delays.reduce((a, b) => a + b, 0) / delays.length }))
     .filter(({ avg }) => avg >= 5)
     .sort((a, b) => b.avg - a.avg);
+  const staticNotices = activeNotices();
 
 
   return (
@@ -736,6 +796,18 @@ export default function App() {
             <img src={wcImgUrl} style={{ width: 16, height: 16 }} alt="" /> WC
           </button>
         </div>
+
+        {staticNotices.map((n, i) => (
+          <div key={i} className="disruption-banner">
+            <span className="disruption-icon">⚠</span>
+            <div className="disruption-body">
+              {n.lines.map((l) => (
+                <span key={l} className="disruption-line-badge">Linie {l}</span>
+              ))}
+              <span>{n.text}</span>
+            </div>
+          </div>
+        ))}
 
         {delayedLines.length > 0 && (
           <div className="disruption-banner">

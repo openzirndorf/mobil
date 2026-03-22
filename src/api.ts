@@ -16,6 +16,22 @@ const OSRM = "https://router.project-osrm.org/route/v1/driving";
 // tripId → array of per-stop-pair coords: segments[i] = coords from stop[i] to stop[i+1]
 const segmentCache = new Map<number, [number, number][][]>();
 
+export function evictSegmentCache(tripId: number): void {
+  segmentCache.delete(tripId);
+}
+
+// Via-point corrections for stop pairs where OSRM car routing takes the wrong road.
+// Keyed by "stopA.name→stopB.name" (names from PULS API).
+const OSRM_VIA: Record<string, Array<{ lat: number; lng: number }>> = {
+  // N8: OSRM routes via Schwabacher Str; N8 fährt aber durch Vogelherdstr (Einbahnstraße Nordabschnitt)
+  "Zirndorf Landratsamt→Zirndorf Am Grasweg": [{ lat: 49.440382, lng: 10.951868 }],
+  // Linie 70 Frühlingsmarkt-Umleitung dir=0: Kraftstr → Albert-Einstein-Str → Landratsamt
+  "Zirndorf Kraftstr.→Zirndorf Landratsamt": [{ lat: 49.44437, lng: 10.95142 }],
+  // Linie 70 Frühlingsmarkt-Umleitung dir=1: Landratsamt → Bahnhof via Brücknerstr (südl. Bypass)
+  // Verhindert Routing durch Nürnberger Str / Marktplatz
+  "Zirndorf Landratsamt→Zirndorf Bahnhof": [{ lat: 49.43986, lng: 10.95803 }],
+};
+
 export async function fetchRoadSegments(
   tripId: number,
   stops: TripStop[]
@@ -26,8 +42,10 @@ export async function fetchRoadSegments(
   const results = await Promise.allSettled(
     stops.slice(0, -1).map((a, i) => {
       const b = stops[i + 1];
+      const via = OSRM_VIA[`${a.name}→${b.name}`] ?? [];
+      const waypoints = [a, ...via, b].map(w => `${w.lng},${w.lat}`).join(";");
       return fetch(
-        `${OSRM}/${a.lng},${a.lat};${b.lng},${b.lat}?overview=full&geometries=geojson`
+        `${OSRM}/${waypoints}?overview=full&geometries=geojson`
       )
         .then((r) => r.json())
         .then((d) =>
