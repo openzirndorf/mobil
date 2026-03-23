@@ -228,6 +228,31 @@ async function railwayRoute(
   return allCoords;
 }
 
+// ── Polyline simplification (Douglas-Peucker) ─────────────────────────────────
+
+function perpendicularDist(p: [number, number], a: [number, number], b: [number, number]): number {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+function simplifyLine(pts: Array<[number, number]>, eps: number): Array<[number, number]> {
+  if (pts.length <= 2) return pts;
+  let maxD = 0, maxI = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = perpendicularDist(pts[i], pts[0], pts[pts.length - 1]);
+    if (d > maxD) { maxD = d; maxI = i; }
+  }
+  if (maxD > eps) {
+    const left = simplifyLine(pts.slice(0, maxI + 1), eps);
+    const right = simplifyLine(pts.slice(maxI), eps);
+    return [...left.slice(0, -1), ...right];
+  }
+  return [pts[0], pts[pts.length - 1]];
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 const GTFS_URL = "https://www.vgn.de/opendata/GTFS.zip";
@@ -245,12 +270,25 @@ const ROUTE_VIA: Record<string, Array<{ afterStop: string; via: Array<{ lat: num
   // N8 dir=0 (Nürnberg→Bronnamberg): Vogelherdstr hat oneway=yes (südwärts) im Nordabschnitt.
   // Via-Punkt auf exaktem OSM-Knoten des bidirektionalen Südabschnitts (way 23156774),
   // damit BRouter nicht via Schwabacher Str ausweicht.
+  // N8 dir=0 (Nürnberg→Bronnamberg): Marktplatz→Landratsamt und Landratsamt→Am Grasweg
   "N8__0": [
-    { afterStop: "Zirndorf Landratsamt", via: [{ lat: 49.440382, lng: 10.951868 }] },
+    { afterStop: "Zirndorf Marktplatz",   via: [{ lat: 49.438, lng: 10.954 }] },
+    { afterStop: "Zirndorf Landratsamt",  via: [{ lat: 49.440382, lng: 10.951868 }] },
   ],
-  // N8 dir=1 (Bronnamberg→Nürnberg)
+  // N8 dir=1 (Bronnamberg→Nürnberg): Am Grasweg→Landratsamt und Landratsamt→Marktplatz
   "N8__1": [
-    { afterStop: "Zirndorf Am Grasweg", via: [{ lat: 49.440382, lng: 10.951868 }] },
+    { afterStop: "Zirndorf Am Grasweg",   via: [{ lat: 49.440382, lng: 10.951868 }] },
+    { afterStop: "Zirndorf Landratsamt",  via: [{ lat: 49.438, lng: 10.954 }] },
+  ],
+  // Linie 112 dir=0 (→Roßtal): Marktplatz→Am Grasweg
+  // BRouter fährt sonst via Schwabacher Str südwärts (lat ~49.4405) statt direkt westlich.
+  // Via-Punkt zwischen Marktplatz und Vogelherdstr hält die Route auf Normalniveau (lat ~49.4415).
+  "112__0": [
+    { afterStop: "Zirndorf Marktplatz",  via: [{ lat: 49.4415, lng: 10.953 }] },
+  ],
+  // Linie 112 dir=1 (→Fürth): Am Grasweg→Marktplatz
+  "112__1": [
+    { afterStop: "Zirndorf Am Grasweg",  via: [{ lat: 49.4415, lng: 10.953 }] },
   ],
 };
 
@@ -486,6 +524,16 @@ async function main() {
       tripDepartures: variantDepartures[key] ?? Array.from({ length: 7 }, () => []),
     };
   }
+
+  // 7b. Simplify polylines to reduce file size (Douglas-Peucker, ~10 m tolerance)
+  const SIMPLIFY_EPS = 0.00010;
+  let totalBefore = 0, totalAfter = 0;
+  for (const shape of Object.values(routeShapes)) {
+    totalBefore += shape.coords.length;
+    shape.coords = simplifyLine(shape.coords, SIMPLIFY_EPS);
+    totalAfter += shape.coords.length;
+  }
+  console.log(`✂  Polylines simplified: ${totalBefore} → ${totalAfter} pts (${Math.round((1 - totalAfter / totalBefore) * 100)}% reduction)`);
 
   // 8. Build final output
   // Collect all Steige per VGN ID (each platform as a separate position)

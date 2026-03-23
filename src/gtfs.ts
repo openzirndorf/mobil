@@ -37,7 +37,7 @@ export interface GtfsData {
 
 // ── IndexedDB helpers ─────────────────────────────────────────────────────────
 
-const IDB_NAME = "trafficmap-v2";
+const IDB_NAME = "trafficmap-v3";
 const IDB_STORE = "gtfs";
 
 function openDb(): Promise<IDBDatabase> {

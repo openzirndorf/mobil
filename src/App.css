@@ -720,6 +720,19 @@ h1 {
   font-size: 0.75rem;
   color: var(--oz-text-secondary);
 }
+.loading-slow-hint {
+  margin-top: 0.6rem;
+  font-size: 0.72rem;
+  color: var(--oz-text-secondary);
+  opacity: 0.75;
+  text-align: center;
+  line-height: 1.5;
+  animation: fadeIn 0.6s ease;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 0.75; }
+}
 
 /* ── Mobile ───────────────────────────────────────────────────────────────── */
 .sidebar-toggle-desktop { display: inline; }

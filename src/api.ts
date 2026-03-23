@@ -22,14 +22,23 @@ export function evictSegmentCache(tripId: number): void {
 
 // Via-point corrections for stop pairs where OSRM car routing takes the wrong road.
 // Keyed by "stopA.name→stopB.name" (names from PULS API).
+// Die echten Haltestellennamen aus der PULS-API nach Regex-Processing
+// (h.Haltestellenname.replace(/ \(Lkr\.FÜ\).*/, "").trim()):
+//   "Landratsamt (Zirndorf (Lkr.FÜ))"  → "Landratsamt (Zirndorf"
+//   "Am Grasweg (Zirndorf (Lkr.FÜ))"   → "Am Grasweg (Zirndorf"
+// Die alten Keys mit "Zirndorf X"-Format haben nie gegriffen!
 const OSRM_VIA: Record<string, Array<{ lat: number; lng: number }>> = {
-  // N8: OSRM routes via Schwabacher Str; N8 fährt aber durch Vogelherdstr (Einbahnstraße Nordabschnitt)
-  "Zirndorf Landratsamt→Zirndorf Am Grasweg": [{ lat: 49.440382, lng: 10.951868 }],
+  // Vogelherdstr-Korridor (Linien 70, 72, N8):
+  // Busse fahren durch Vogelherdstr; OSRM car routing nähme sonst Schwabacher Str.
+  // Via-Punkt auf dem bidirektionalen Südabschnitt von Vogelherdstr (OSM way 23156774).
+  "Landratsamt (Zirndorf→Am Grasweg (Zirndorf":   [{ lat: 49.440382, lng: 10.951868 }],
+  "Am Grasweg (Zirndorf→Landratsamt (Zirndorf":   [{ lat: 49.440382, lng: 10.951868 }],
+  // Marktplatz↔Landratsamt: kein Via-Punkt nötig – OSRM findet direkt die korrekte
+  // Route via Schwabacher Str (533m/521m, lat 49.439–49.442).
   // Linie 70 Frühlingsmarkt-Umleitung dir=0: Kraftstr → Albert-Einstein-Str → Landratsamt
-  "Zirndorf Kraftstr.→Zirndorf Landratsamt": [{ lat: 49.44437, lng: 10.95142 }],
-  // Linie 70 Frühlingsmarkt-Umleitung dir=1: Landratsamt → Bahnhof via Brücknerstr (südl. Bypass)
-  // Verhindert Routing durch Nürnberger Str / Marktplatz
-  "Zirndorf Landratsamt→Zirndorf Bahnhof": [{ lat: 49.43986, lng: 10.95803 }],
+  "Kraftstr. (Zirndorf→Landratsamt (Zirndorf":    [{ lat: 49.44437, lng: 10.95142 }],
+  // Linie 70 Frühlingsmarkt-Umleitung dir=1: Landratsamt → Brücknerstr (südl. Bypass)
+  "Landratsamt (Zirndorf→Brücknerstr. (Zirndorf": [{ lat: 49.43986, lng: 10.95803 }],
 };
 
 export async function fetchRoadSegments(
@@ -66,6 +75,13 @@ export async function fetchRoadSegments(
   return segments;
 }
 
+// ── Fetch with timeout ────────────────────────────────────────────────────────
+function fetchT(url: string, ms = 10_000): Promise<Response> {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(tid));
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function parseDate(s: string | undefined): Date | null {
@@ -80,11 +96,11 @@ function betriebstagNow(): string {
 
 // ── API calls ─────────────────────────────────────────────────────────────────
 
-// Alle 12 Gemeindeteile + umliegende Orte für vollständige Erfassung
+// Alle Gemeindeteile + umliegende Orte für vollständige Erfassung
 const STOP_AREAS = [
   "Zirndorf", "Anwanden", "Banderbach", "Bronnamberg",
   "Leichendorf", "Lind", "Weiherhof", "Weinzierlein",
-  "Wintersdorf", "Wolfgangshof", "Alte Veste",
+  "Wintersdorf", "Wolfgangshof", "Alte Veste", "Oberasbach",
 ];
 
 // Bounding-Box des Zirndorfer Gemeindegebiets
@@ -98,7 +114,7 @@ export function stopInZirndorf(lat: number, lng: number): boolean {
 export async function fetchZirndorfStops(): Promise<Stop[]> {
   const results = await Promise.allSettled(
     STOP_AREAS.map((name) =>
-      fetch(`${BASE}/haltestellen.json/vgn?name=${encodeURIComponent(name)}`).then((r) => r.json())
+      fetchT(`${BASE}/haltestellen.json/vgn?name=${encodeURIComponent(name)}`).then((r) => r.json())
     )
   );
   const seen = new Set<number>();
@@ -162,7 +178,7 @@ interface TripInfo {
 export async function fetchActiveTripIds(stops: Stop[]): Promise<Map<number, TripInfo>> {
   const results = await Promise.allSettled(
     stops.map((s) =>
-      fetch(`${BASE}/abfahrten.json/vgn/${s.vgnId}?timeoffset=-30&timespan=90`)
+      fetchT(`${BASE}/abfahrten.json/vgn/${s.vgnId}?timeoffset=-30&timespan=90`)
         .then((r) => r.json())
         .then((data) => ({ stop: s, abfahrten: (data.Abfahrten ?? []) as AbfahrtRaw[] }))
     )
@@ -209,7 +225,7 @@ async function fetchTripRoute(
   produkt: string
 ): Promise<{ line: string; direction: string; vehicleId: string; stops: TripStop[] } | null> {
   try {
-    const res = await fetch(
+    const res = await fetchT(
       `${BASE}/v1/fahrten.json/${produkt}/${tripId}?betriebstag=${betriebstag}`
     );
     if (!res.ok) return null;

@@ -249,7 +249,7 @@ function makeBusIcon(line: string, delay: number, bearing: number, routeType?: n
 }
 
 function makeStopIcon(isZirndorf = false, zoom = 13): L.DivIcon {
-  const base = Math.round(Math.max(8, Math.min(40, 24 + (zoom - 13) * 4)));
+  const base = Math.round(Math.max(6, Math.min(32, 16 + (zoom - 13) * 3)));
   const size = isZirndorf ? base : Math.round(base * 0.7);
   return L.divIcon({
     className: "",
@@ -322,6 +322,8 @@ export default function App() {
   const osrmSegmentsRef = useRef<Map<number, [number, number][][]>>(new Map());
   // Trips already routed with correct detour stops (to avoid re-clearing on every tick)
   const detourRoutedRef = useRef<Set<number>>(new Set());
+  // Guard: fetch Overpass POI data only once, on first POI-layer activation
+  const poisFetchedRef = useRef(false);
 
   const [stops, setStops] = useState<Stop[]>([]);
   const [buses, setBuses] = useState<Bus[]>([]);
@@ -345,6 +347,7 @@ export default function App() {
 
   const [overlayVisible, setOverlayVisible] = useState(true);
   const [overlayFading, setOverlayFading] = useState(false);
+  const [showSlowHint, setShowSlowHint] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
 
   // Fade out loading overlay once first data arrives
@@ -356,8 +359,17 @@ export default function App() {
     }
   }, [loading, overlayVisible]);
 
+  // Show "first load takes longer" hint after 4 s of waiting
+  useEffect(() => {
+    if (!loading) return;
+    const t = setTimeout(() => setShowSlowHint(true), 4_000);
+    return () => clearTimeout(t);
+  }, [loading]);
+
   const busesRef = useRef<Bus[]>([]);
   busesRef.current = buses;
+  const stopsRef = useRef<Stop[]>([]);
+  stopsRef.current = stops;
   // Track when each trip was last seen to avoid flickering on refresh
   const busLastSeenRef = useRef<Map<number, number>>(new Map());
   const gtfsRef = useRef<GtfsData | null>(null);
@@ -380,12 +392,26 @@ export default function App() {
 
   // ── Load GTFS data ──────────────────────────────────────────────────────────
   useEffect(() => {
-    loadGtfsData((partial) => { setGtfs(partial); gtfsRef.current = partial; })
-      .then((full) => { setGtfs(full); gtfsRef.current = full; });
+    loadGtfsData((partial) => {
+      // Fresh network data arrived (different generated timestamp) → clear shape cache
+      // so buses are re-matched with the new shapes on next render.
+      shapeRangesRef.current.clear();
+      setGtfs(partial); gtfsRef.current = partial;
+    }).then((full) => {
+      // If routes weren't available yet (first network load), re-fetch buses now so
+      // lines that needed GTFS fallback (fetchTripRoute failed) appear immediately.
+      const hadRoutes = Object.keys(gtfsRef.current?.routeShapes ?? {}).length > 0;
+      setGtfs(full); gtfsRef.current = full;
+      if (!hadRoutes && stopsRef.current.length) refresh(stopsRef.current);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Fetch P+R and bicycle parking from Overpass ──────────────────────────────
+  // ── Fetch P+R / POI from Overpass – lazy: only on first POI-layer activation ──
   useEffect(() => {
+    const anyVisible = poisVisible.park_ride || poisVisible.bicycle_parking || poisVisible.taxi || poisVisible.toilets;
+    if (!anyVisible || poisFetchedRef.current) return;
+    poisFetchedRef.current = true;
     const q = `[out:json][timeout:20];(
       node["amenity"="parking"]["park_ride"="yes"](49.38,10.86,49.54,11.08);
       way["amenity"="parking"]["park_ride"="yes"](49.38,10.86,49.54,11.08);
@@ -423,7 +449,7 @@ export default function App() {
         );
       })
       .catch(() => {});
-  }, []);
+  }, [poisVisible]);
 
   // ── Draw all GTFS stops once data loads ──────────────────────────────────────
   useEffect(() => {
@@ -582,20 +608,26 @@ export default function App() {
         });
       }
 
-      // ── Compute route coords (GTFS shape trimmed to this bus's stops) ────────
+      // ── Compute route coords (clipped from current segment to last stop) ────
       const gtfsCachedRoute = onDetour ? undefined : shapeRangesRef.current.get(bus.tripId);
+      const osrmSegsRoute = osrmSegmentsRef.current.get(bus.tripId);
       let routeCoords: [number, number][];
       if (gtfsCachedRoute) {
         const { shape, ranges } = gtfsCachedRoute;
-        const fromSI = nearestShapeStop(shape, bus.stops[0]);
-        const toSI = nearestShapeStop(shape, bus.stops[bus.stops.length - 1]);
+        // Start from current segment (not from trip start) to avoid showing already-traveled path
+        const fromStop = bus.stops[Math.min(bus.segmentIndex, bus.stops.length - 1)];
+        const toStop = bus.stops[bus.stops.length - 1];
+        const fromSI = nearestShapeStop(shape, fromStop);
+        const toSI = nearestShapeStop(shape, toStop);
         const c0 = ranges[Math.min(fromSI, ranges.length - 1)] ?? 0;
         const c1 = ranges[Math.min(toSI, ranges.length - 1)] ?? shape.coords.length - 1;
         routeCoords = c0 <= c1
           ? shape.coords.slice(c0, c1 + 1)
           : shape.coords.slice(c1, c0 + 1).reverse();
+      } else if (osrmSegsRoute) {
+        routeCoords = osrmSegsRoute.slice(bus.segmentIndex).flat() as [number, number][];
       } else {
-        routeCoords = bus.stops.map((s) => [s.lat, s.lng] as [number, number]);
+        routeCoords = bus.stops.slice(bus.segmentIndex).map((s) => [s.lat, s.lng] as [number, number]);
       }
 
       // ── Route polyline ──────────────────────────────────────────────────────
@@ -605,7 +637,7 @@ export default function App() {
       } else {
         const line = routeLinesRef.current.get(bus.tripId)!;
         line.setStyle({ color });
-        if (gtfsCachedRoute) line.setLatLngs(routeCoords);
+        if (gtfsCachedRoute || osrmSegsRoute) line.setLatLngs(routeCoords);
       }
 
       // ── Bus position: GTFS shape → OSRM fallback → stop interpolation ───────
@@ -613,18 +645,15 @@ export default function App() {
       let displayLng = bus.position.lng;
       let bearing = bus.bearing;
 
-      const gtfsCached = onDetour ? undefined : shapeRangesRef.current.get(bus.tripId);
-      const osrmSegs = osrmSegmentsRef.current.get(bus.tripId);
-
-      if (gtfsCached) {
-        const { shape, ranges } = gtfsCached;
+      if (gtfsCachedRoute) {
+        const { shape, ranges } = gtfsCachedRoute;
         const segCoords = shapeSlice(shape, ranges, bus.segmentIndex, bus.stops);
         if (segCoords.length >= 2) {
           const pt = pointOnPolyline(segCoords, bus.segmentT);
           displayLat = pt.lat; displayLng = pt.lng; bearing = pt.bearing;
         }
-      } else if (osrmSegs && bus.segmentIndex < osrmSegs.length) {
-        const seg = osrmSegs[bus.segmentIndex];
+      } else if (osrmSegsRoute && bus.segmentIndex < osrmSegsRoute.length) {
+        const seg = osrmSegsRoute[bus.segmentIndex];
         if (seg?.length >= 2) {
           const pt = pointOnPolyline(seg, bus.segmentT);
           displayLat = pt.lat; displayLng = pt.lng; bearing = pt.bearing;
@@ -711,6 +740,9 @@ export default function App() {
             </div>
             <div className="loading-spinner" aria-hidden="true" />
             <span className="loading-status">Echtzeitdaten werden geladen…</span>
+            {showSlowHint && (
+              <p className="loading-slow-hint">Beim ersten Besuch etwas länger –<br />danach startet die App sofort.</p>
+            )}
           </div>
         </div>
       )}
