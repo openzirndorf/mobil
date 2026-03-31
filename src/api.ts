@@ -412,7 +412,6 @@ async function findScheduledBuses(gtfs: GtfsData, now: Date): Promise<Bus[]> {
 
     const firstSec = shape.stopTimes[0];
     const lastSec = shape.stopTimes[shape.stopTimes.length - 1];
-    const duration = lastSec - firstSec;
 
     // First stop within the Zirndorf area (to anchor the pre-departure window)
     const firstZirndorfIdx = shape.stopCoords.findIndex(([lat, lng]) => stopInZirndorf(lat, lng));
