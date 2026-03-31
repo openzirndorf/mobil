@@ -25,7 +25,7 @@ export interface GtfsRouteShape {
   stopNames?: string[];
   stopTimes?: number[]; // seconds from midnight per stop, parallel to stopCoords
   /** Departure times + headsigns per day (0=Sun…6=Sat), each sorted ascending by dep */
-  tripDepartures?: Array<Array<{ dep: number; headsign: string }>>;
+  tripDepartures?: Array<Array<{ dep: number; headsign: string; startIdx?: number }>>;
 }
 
 export interface GtfsData {

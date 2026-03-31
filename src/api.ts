@@ -114,7 +114,7 @@ export function stopInZirndorf(lat: number, lng: number): boolean {
 export async function fetchZirndorfStops(): Promise<Stop[]> {
   const results = await Promise.allSettled(
     STOP_AREAS.map((name) =>
-      fetchT(`${BASE}/haltestellen.json/vgn?name=${encodeURIComponent(name)}`).then((r) => r.json())
+      fetchT(`${BASE}/haltestellen.json/vgn?name=${encodeURIComponent(name)}`).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     )
   );
   const seen = new Set<number>();
@@ -179,7 +179,7 @@ export async function fetchActiveTripIds(stops: Stop[]): Promise<Map<number, Tri
   const results = await Promise.allSettled(
     stops.map((s) =>
       fetchT(`${BASE}/abfahrten.json/vgn/${s.vgnId}?timeoffset=-30&timespan=90`)
-        .then((r) => r.json())
+        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then((data) => ({ stop: s, abfahrten: (data.Abfahrten ?? []) as AbfahrtRaw[] }))
     )
   );
@@ -421,15 +421,24 @@ async function findScheduledBuses(gtfs: GtfsData, now: Date): Promise<Bus[]> {
 
     for (const entry of deps) {
       const dep = entry.dep;
-      const offset = dep - firstSec;
-      // Window: up to 5 min before train reaches Zirndorf area, until trip ends + 2 min
-      const firstZirndorfActual = firstZirndorfSec + offset;
-      if (nowSec < firstZirndorfActual - 5 * 60 || nowSec > dep + duration + 120) continue;
+      const startIdx = entry.startIdx ?? 0;
+      const startSec = shape.stopTimes![startIdx];
+      const offset = dep - startSec;
+      const tripEndSec = dep + (lastSec - startSec);
 
-      const allStops: TripStop[] = shape.stopCoords.map(([lat, lng], i) => {
-        const soll = new Date(midnight.getTime() + (shape.stopTimes![i] + offset) * 1000);
+      // First Zirndorf stop reachable from startIdx (may differ from firstZirndorfIdx)
+      const effectiveZirndorfSec = startIdx <= firstZirndorfIdx
+        ? firstZirndorfSec
+        : (shape.stopTimes!.find((_, i) => i >= startIdx && stopInZirndorf(...shape.stopCoords[i])) ?? firstZirndorfSec);
+
+      // Window: up to 5 min before train reaches Zirndorf area, until trip ends + 2 min
+      const firstZirndorfActual = effectiveZirndorfSec + offset;
+      if (nowSec < firstZirndorfActual - 5 * 60 || nowSec > tripEndSec + 120) continue;
+
+      const allStops: TripStop[] = shape.stopCoords.slice(startIdx).map(([lat, lng], i) => {
+        const soll = new Date(midnight.getTime() + (shape.stopTimes![startIdx + i] + offset) * 1000);
         return {
-          name: shape.stopNames?.[i] ?? "",
+          name: shape.stopNames?.[startIdx + i] ?? "",
           lat, lng,
           arrivalIst: null,
           departureIst: soll,
@@ -442,8 +451,9 @@ async function findScheduledBuses(gtfs: GtfsData, now: Date): Promise<Bus[]> {
       let stops = allStops;
       if (entry.headsign && entry.headsign !== shape.headsign && shape.stopNames?.length) {
         const normHS = entry.headsign.toLowerCase().replace(/[\s()\-.,/]/g, "");
-        for (let i = shape.stopNames.length - 1; i > 0; i--) {
-          const normName = shape.stopNames[i].toLowerCase().replace(/[\s()\-.,/]/g, "");
+        const slicedNames = shape.stopNames.slice(startIdx);
+        for (let i = slicedNames.length - 1; i > 0; i--) {
+          const normName = slicedNames[i].toLowerCase().replace(/[\s()\-.,/]/g, "");
           if (normName.startsWith(normHS.slice(0, 6)) || normHS.startsWith(normName.slice(0, 6))) {
             stops = allStops.slice(0, i + 1);
             break;

@@ -1,6 +1,6 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { enrichBusDelays, evictSegmentCache, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, refreshPositions, stopInZirndorf } from "./api";
 import {
   buildCoordRanges,
@@ -320,6 +320,8 @@ export default function App() {
   const shapeRangesRef = useRef<Map<number, { shape: GtfsRouteShape; ranges: number[] }>>(new Map());
   // OSRM fallback segments for buses without a matching GTFS shape
   const osrmSegmentsRef = useRef<Map<number, [number, number][][]>>(new Map());
+  // Stop markers with isZirn flag for zoom-only icon updates
+  const stopMarkersDataRef = useRef<Array<{ marker: L.Marker; isZirn: boolean }>>([]);
   // Trips already routed with correct detour stops (to avoid re-clearing on every tick)
   const detourRoutedRef = useRef<Set<number>>(new Set());
   // Guard: fetch Overpass POI data only once, on first POI-layer activation
@@ -451,11 +453,12 @@ export default function App() {
       .catch(() => {});
   }, [poisVisible]);
 
-  // ── Draw all GTFS stops once data loads ──────────────────────────────────────
+  // ── Draw all GTFS stops once data loads (rebuilt only on data/visibility change) ──
   useEffect(() => {
     const map = mapInstance.current;
     if (!gtfs || !stopLayerRef.current || !map) return;
     stopLayerRef.current.clearLayers();
+    stopMarkersDataRef.current = [];
     if (!stopsVisible) { stopLayerRef.current.remove(); return; }
     stopLayerRef.current.addTo(map);
 
@@ -464,7 +467,7 @@ export default function App() {
       const positions = stop.steige ?? [{ lat: stop.lat, lng: stop.lng }];
       for (const pos of positions) {
         const isZirn = stopInZirndorf(pos.lat, pos.lng);
-        L.marker([pos.lat, pos.lng], {
+        const marker = L.marker([pos.lat, pos.lng], {
           icon: makeStopIcon(isZirn, zoom),
           zIndexOffset: isZirn ? 0 : -200,
         })
@@ -479,9 +482,18 @@ export default function App() {
             });
           })
           .addTo(stopLayerRef.current!);
+        stopMarkersDataRef.current.push({ marker, isZirn });
       }
     }
-  }, [gtfs, stops, zoom, stopsVisible]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gtfs, stopsVisible]);
+
+  // ── Update stop icon sizes on zoom (no full rebuild) ─────────────────────────
+  useEffect(() => {
+    for (const { marker, isZirn } of stopMarkersDataRef.current) {
+      marker.setIcon(makeStopIcon(isZirn, zoom));
+    }
+  }, [zoom]);
 
   // ── Draw POI layer ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -513,18 +525,22 @@ export default function App() {
     try {
       const fresh = await fetchAllBuses(currentStops, gtfsRef.current ?? undefined);
       const now = Date.now();
-      const threshold = now - REFRESH_INTERVAL_MS * 1.5;
+      const threshold = now - REFRESH_INTERVAL_MS * 5;
       for (const b of fresh) busLastSeenRef.current.set(b.tripId, now);
       const mergeBuses = (base: Bus[], updated: Bus[]) => {
         const updatedMap = new Map(updated.map((b) => [b.tripId, b]));
         const kept = base.filter((b) => !updatedMap.has(b.tripId) && (busLastSeenRef.current.get(b.tripId) ?? 0) > threshold);
         return [...updated, ...kept];
       };
-      setBuses((prev) => mergeBuses(prev, fresh));
-      // Enrich with delays in background – doesn't block initial render
-      enrichBusDelays(fresh).then((enriched) => {
-        setBuses((prev) => mergeBuses(prev, enriched));
-      }).catch(() => {});
+      // Wenn die API komplett leer zurückkommt obwohl vorher Busse da waren,
+      // ist das ein API-Ausfall – alte Busse nicht löschen.
+      if (fresh.length > 0 || busesRef.current.length === 0) {
+        setBuses((prev) => mergeBuses(prev, fresh));
+        // Enrich with delays in background – doesn't block initial render
+        enrichBusDelays(fresh).then((enriched) => {
+          setBuses((prev) => mergeBuses(prev, enriched));
+        }).catch(() => {});
+      }
       setLastUpdate(new Date());
       setError(null);
     } catch {
@@ -569,7 +585,6 @@ export default function App() {
 
       // Lines with active static notices use OSRM (detour) instead of pre-built GTFS shape
       const onDetour = staticNotices.some(n => n.lines.includes(bus.line));
-      if (bus.line === "70") console.log("[70]", bus.tripId, "onDetour:", onDetour, "notices:", staticNotices.length, "stops:", bus.stops.map(s => s.name).join(", "));
 
       // First time we see a detour trip: clear any stale cached routes
       if (onDetour && !detourRoutedRef.current.has(bus.tripId)) {
@@ -713,16 +728,20 @@ export default function App() {
     return fmtTime(d);
   };
 
-  // Derive per-line delay hints from live data
-  const lineDelayMap = new Map<string, number[]>();
-  for (const bus of activeBuses) {
-    if (!lineDelayMap.has(bus.line)) lineDelayMap.set(bus.line, []);
-    lineDelayMap.get(bus.line)!.push(bus.delayMinutes);
-  }
-  const delayedLines = [...lineDelayMap.entries()]
-    .map(([line, delays]) => ({ line, avg: delays.reduce((a, b) => a + b, 0) / delays.length }))
-    .filter(({ avg }) => avg >= 5)
-    .sort((a, b) => b.avg - a.avg);
+  // Derive per-line delay hints from live data (only recompute when delays actually change)
+  const delayedLines = useMemo(() => {
+    const lineDelayMap = new Map<string, number[]>();
+    for (const bus of activeBuses) {
+      if (!lineDelayMap.has(bus.line)) lineDelayMap.set(bus.line, []);
+      lineDelayMap.get(bus.line)!.push(bus.delayMinutes);
+    }
+    return [...lineDelayMap.entries()]
+      .map(([line, delays]) => ({ line, avg: delays.reduce((a, b) => a + b, 0) / delays.length }))
+      .filter(({ avg }) => avg >= 5)
+      .sort((a, b) => b.avg - a.avg);
+  // delayMinutes only changes on full API refresh (every 15s), not on position refresh (every 1s)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBuses.map((b) => `${b.tripId}:${b.delayMinutes}`).join(",")]);
   const staticNotices = activeNotices();
 
 

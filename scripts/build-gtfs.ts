@@ -424,13 +424,32 @@ async function main() {
     for (const [tripId, seq] of Object.entries(tripStopSeqs)) {
       const t = trips[tripId];
       if (!t || variantKey(t.routeId, t.direction, t.headsign) !== key) continue;
-      const match = seq.find((s) => s.stopId === canonFirstId);
-      if (!match?.depTime) continue;
-      const depSec = gtfsTimeToSeconds(match.depTime);
+
+      let depSec: number | null = null;
+      let startIdx = 0;
+
+      // Common case: trip starts at the canonical first stop
+      const matchFirst = seq.find((s) => s.stopId === canonFirstId);
+      if (matchFirst?.depTime) {
+        depSec = gtfsTimeToSeconds(matchFirst.depTime);
+      } else {
+        // Trip starts from an intermediate stop (e.g. Ansbach→Nürnberg on S4 Crailsheim shape).
+        // Find the first canonical stop that appears in this trip's stop sequence.
+        for (let ci = 1; ci < variant.stopIds.length; ci++) {
+          const m = seq.find((s) => s.stopId === variant.stopIds[ci]);
+          if (m?.depTime) {
+            depSec = gtfsTimeToSeconds(m.depTime);
+            startIdx = ci;
+            break;
+          }
+        }
+      }
+
+      if (depSec === null) continue;
       const cal = serviceCalendar.get(t.serviceId);
       if (!cal) continue;
       for (let d = 0; d < 7; d++) {
-        if (cal[d]) depsPerDay[d].push({ dep: depSec, headsign: t.headsign });
+        if (cal[d]) depsPerDay[d].push({ dep: depSec, headsign: t.headsign, ...(startIdx ? { startIdx } : {}) });
       }
     }
     for (const arr of depsPerDay) arr.sort((a, b) => a.dep - b.dep);
