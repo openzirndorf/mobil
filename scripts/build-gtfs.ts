@@ -253,6 +253,93 @@ function simplifyLine(pts: Array<[number, number]>, eps: number): Array<[number,
   return [pts[0], pts[pts.length - 1]];
 }
 
+// ── Poll stops (minimal stop set that sees every bus trip) ────────────────────
+//
+// Die App erkennt aktive Fahrten über die Abfahrtsmonitore einzelner Haltestellen.
+// Die PULS-Namens-/Umkreissuche liefert aber höchstens ~17 Treffer – damit fehlten
+// Marktplatz, Am Grasweg usw. und viele Fahrten tauchten nie auf. Stattdessen
+// hier ein Greedy-Set-Cover: möglichst wenige Haltestellen, an denen jede
+// Bus-Fahrt aus dem GTFS mit mindestens einem Halt im Gebiet vorbeikommt.
+
+// Muss zu ZIRNDORF_BBOX in src/api.ts passen
+const POLL_BBOX = { latMin: 49.38, latMax: 49.49, lngMin: 10.87, lngMax: 11.01 };
+// Schienenverkehr kommt aus dem Fahrplan (SCHEDULE_ONLY_LINES), nicht aus PULS
+const POLL_SKIP_LINES = new Set(["S4", "RB11", "RB 11", "RE 90"]);
+const PULS_BASE = "https://start.vag.de/dm/api";
+
+/** false nur wenn PULS die ID explizit nicht kennt – bei Netzfehlern lieber behalten */
+async function pulsKnowsStop(vgnId: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${PULS_BASE}/abfahrten.json/vgn/${vgnId}?timespan=1`, { signal: AbortSignal.timeout(15_000) });
+    return r.status !== 404;
+  } catch {
+    return true;
+  }
+}
+
+async function computePollStops(
+  tripStopSeqs: Record<string, Array<{ stopId: string }>>,
+  trips: Record<string, { routeId: string }>,
+  routes: Record<string, { line: string }>,
+  stops: Record<string, { name: string; lat: number; lng: number; vgnId: string }>,
+): Promise<Array<{ vgnId: number; name: string; lat: number; lng: number }>> {
+  console.log("🎯 Computing poll stops…");
+  const inBbox = (s: { lat: number; lng: number }) =>
+    s.lat >= POLL_BBOX.latMin && s.lat <= POLL_BBOX.latMax && s.lng >= POLL_BBOX.lngMin && s.lng <= POLL_BBOX.lngMax;
+
+  // Pro Fahrt: Menge der VGN-IDs im Gebiet (identische Mengen zusammengefasst, mit Anzahl)
+  const tripSets = new Map<string, { ids: Set<string>; count: number; line: string }>();
+  for (const [tripId, seq] of Object.entries(tripStopSeqs)) {
+    const line = routes[trips[tripId]?.routeId]?.line;
+    if (!line || POLL_SKIP_LINES.has(line)) continue;
+    const ids = new Set(seq.map((s) => stops[s.stopId]).filter((s) => s?.vgnId && inBbox(s)).map((s) => s.vgnId));
+    if (!ids.size) continue;
+    const key = [...ids].sort().join(",");
+    const entry = tripSets.get(key);
+    if (entry) entry.count++; else tripSets.set(key, { ids, count: 1, line });
+  }
+
+  // Kandidaten gegen PULS prüfen – viele GTFS-IDs existieren dort nicht (404)
+  const candidates = [...new Set([...tripSets.values()].flatMap((t) => [...t.ids]))];
+  const valid = new Set<string>();
+  const queue = [...candidates];
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (queue.length) {
+      const id = queue.shift()!;
+      if (await pulsKnowsStop(id)) valid.add(id);
+    }
+  }));
+  console.log(`   ${valid.size}/${candidates.length} candidate stops known to PULS`);
+
+  const uncovered = new Map<string, { ids: Set<string>; count: number }>();
+  const uncoverable = new Map<string, number>();
+  for (const [key, t] of tripSets) {
+    const ids = new Set([...t.ids].filter((id) => valid.has(id)));
+    if (ids.size) uncovered.set(key, { ids, count: t.count });
+    else uncoverable.set(t.line, (uncoverable.get(t.line) ?? 0) + t.count);
+  }
+
+  const chosen: string[] = [];
+  while (uncovered.size) {
+    const gain = new Map<string, number>();
+    for (const t of uncovered.values()) for (const id of t.ids) gain.set(id, (gain.get(id) ?? 0) + t.count);
+    const [best] = [...gain.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    chosen.push(best);
+    for (const [key, t] of uncovered) if (t.ids.has(best)) uncovered.delete(key);
+  }
+  if (uncoverable.size) {
+    console.warn(`   ⚠ trips without PULS-known stop in the area: ${[...uncoverable].map(([l, n]) => `${l}×${n}`).join(", ")}`);
+  }
+
+  const byVgnId = new Map(Object.values(stops).filter((s) => s.vgnId).map((s) => [s.vgnId, s]));
+  const result = chosen.sort().map((id) => {
+    const s = byVgnId.get(id)!;
+    return { vgnId: parseInt(id), name: s.name, lat: s.lat, lng: s.lng };
+  });
+  console.log(`   ${result.length} poll stops: ${result.map((s) => s.name).join(", ")}`);
+  return result;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 const GTFS_URL = "https://www.vgn.de/opendata/GTFS.zip";
@@ -365,13 +452,19 @@ async function main() {
   const calendarData = await readZipFile(GTFS_CACHE, "calendar.txt");
   // serviceId → boolean[7], index matches JS getDay() (0=Sun, 1=Mon … 6=Sat)
   const serviceCalendar = new Map<string, boolean[]>();
+  // Abgelaufene Fahrplanperioden überspringen: das VGN-GTFS enthält sie weiterhin
+  // (z. B. S4 bis 10.07. und ab 11.07. als zwei Routen mit identischen Zeiten) –
+  // ohne Filter erschien jede S4 doppelt.
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  let expired = 0;
   for (const r of parseCsv(calendarData)) {
+    if (r.end_date && r.end_date < today) { expired++; continue; }
     serviceCalendar.set(r.service_id, [
       r.sunday === "1", r.monday === "1", r.tuesday === "1",
       r.wednesday === "1", r.thursday === "1", r.friday === "1", r.saturday === "1",
     ]);
   }
-  console.log(`   ${serviceCalendar.size} service patterns`);
+  console.log(`   ${serviceCalendar.size} service patterns (${expired} expired skipped)`);
 
   // 5. Parse stop_times → build route variants + collect all stop_ids used
   console.log("⏱  Parsing stop_times (this takes a moment)…");
@@ -579,6 +672,8 @@ async function main() {
     ])
   );
 
+  const pollStops = await computePollStops(tripStopSeqs, trips, routes, stops);
+
   const generated = new Date().toISOString();
 
   const lineInfo = Object.fromEntries(
@@ -588,7 +683,7 @@ async function main() {
       .filter(([line], i, arr) => arr.findIndex(([l]) => l === line) === i)
   ) as Record<string, { name: string; type: number; desc: string }>;
 
-  const stopsOutput = { generated, gtfsSource: GTFS_URL, stopsByVgnId, lineInfo };
+  const stopsOutput = { generated, gtfsSource: GTFS_URL, stopsByVgnId, lineInfo, pollStops };
   const routesOutput = { generated, routeShapes };
 
   fs.mkdirSync("public", { recursive: true });

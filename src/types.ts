@@ -38,7 +38,7 @@ export interface FahrtHaltRaw {
 export interface Stop {
   name: string;
   vgnId: number;
-  vagId: string;
+  vagId?: string;
   lat: number;
   lng: number;
 }

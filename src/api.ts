@@ -111,6 +111,25 @@ export function stopInZirndorf(lat: number, lng: number): boolean {
     && lng >= ZIRNDORF_BBOX.lngMin && lng <= ZIRNDORF_BBOX.lngMax;
 }
 
+// Linien außerhalb des GTFS-Linienkatalogs nur anzeigen, wenn sie in einem der
+// STOP_AREAS-Orte halten – sonst kämen über die Fürther Poll-Haltestellen auch
+// U1 & Fürther Stadtbusse auf die Karte. (Bbox geht nicht: Fürth-Süd liegt drin.)
+const STOP_AREA_RE = new RegExp(`\\b(?:${STOP_AREAS.join("|")}|Zirnd\\.)(?![a-zäöüß])`);
+
+function stopInStopAreas(name: string): boolean {
+  return STOP_AREA_RE.test(name);
+}
+
+/**
+ * Haltestellen, deren Abfahrtsmonitore abgefragt werden. Vorberechnet in
+ * build-gtfs.ts (Set-Cover über alle Fahrten) – die PULS-Namenssuche liefert
+ * nur ~17 Treffer und hat Marktplatz, Am Grasweg usw. nie gefunden.
+ */
+export function pollStopsFromGtfs(gtfs: GtfsData): Stop[] {
+  return (gtfs.pollStops ?? []).map((s) => ({ name: s.name, vgnId: s.vgnId, lat: s.lat, lng: s.lng }));
+}
+
+/** Fallback für alte gtfs_stops.json ohne pollStops */
 export async function fetchZirndorfStops(): Promise<Stop[]> {
   const results = await Promise.allSettled(
     STOP_AREAS.map((name) =>
@@ -266,12 +285,27 @@ function interpolatePosition(
     const b = stops[i + 1];
     // Ist-Zeit bevorzugt, Soll-Zeit als Fallback (zeigt auch Busse ohne Echtzeit-Daten)
     const departedA = a.departureIst ?? a.arrivalIst ?? a.departureSoll ?? a.arrivalSoll;
-    const arrivedB = b.arrivalIst ?? b.departureSoll ?? b.arrivalSoll;
+    // Ist vor Soll – sonst endet das Fenster bei Verspätung vor seinem Anfang und der
+    // Bus springt in einen falschen Abschnitt (GTFS-rekonstruierte Fahrten haben nur departureIst)
+    const arrivedB = b.arrivalIst ?? b.departureIst ?? b.arrivalSoll ?? b.departureSoll;
     if (!departedA || !arrivedB) continue;
 
     // Verweilzeit: Bus erscheint 5s vor Abfahrt an der Haltestelle
     const dwellMs = 5_000;
     const windowStart = new Date(departedA.getTime() - dwellMs);
+
+    // Bus steht an Haltestelle B (zwischen Ankunft und Abfahrt) → dort festhalten,
+    // statt dass er bis zum nächsten Abschnitt verschwindet
+    const departedB = b.departureIst ?? b.departureSoll;
+    if (i + 1 < stops.length - 1 && departedB && now > arrivedB && now.getTime() < departedB.getTime() - dwellMs) {
+      const soll = b.arrivalSoll ?? b.departureSoll;
+      return {
+        lat: b.lat, lng: b.lng,
+        segmentIndex: i, segmentT: 1,
+        prevStop: a.name, nextStop: b.name,
+        delayMinutes: soll ? Math.round((arrivedB.getTime() - soll.getTime()) / 60000) : 0,
+      };
+    }
 
     if (now >= windowStart && now <= arrivedB) {
       const total = arrivedB.getTime() - departedA.getTime();
@@ -294,7 +328,7 @@ function interpolatePosition(
   }
 
   const last = stops[stops.length - 1];
-  const lastTime = last.arrivalIst ?? last.departureSoll;
+  const lastTime = last.arrivalIst ?? last.departureIst ?? last.arrivalSoll ?? last.departureSoll;
   if (lastTime && now >= lastTime && now.getTime() - lastTime.getTime() < 120_000) {
     return {
       lat: last.lat, lng: last.lng,
@@ -337,22 +371,26 @@ const SCHEDULE_ONLY_LINES = new Set(["S4", "RB11", "RB 11"]);
 // ── DB REST API – real-time delays for S-Bahn / regional trains ───────────────
 const DB_REST = "https://v6.db.transport.rest";
 
-// Stop ID cache: "lat2,lng2" → HAFAS stop ID (permanent)
-const dbStopIdCache = new Map<string, string | null>();
+// Stop ID cache: "lat2,lng2" → HAFAS stop ID. Fehlschläge nur kurz merken –
+// sonst bleiben Zugverspätungen nach einem einzigen Aussetzer die ganze Sitzung weg.
+const dbStopIdCache = new Map<string, { id: string | null; ts: number }>();
+const DB_FAIL_RETRY_MS = 5 * 60 * 1000;
 
 async function lookupDbStopId(lat: number, lng: number): Promise<string | null> {
   const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
-  if (dbStopIdCache.has(key)) return dbStopIdCache.get(key)!;
+  const cached = dbStopIdCache.get(key);
+  if (cached && (cached.id !== null || Date.now() - cached.ts < DB_FAIL_RETRY_MS)) return cached.id;
   try {
-    const res = await fetch(
-      `${DB_REST}/stops/nearby?latitude=${lat}&longitude=${lng}&results=3&distance=600`
+    const res = await fetchT(
+      `${DB_REST}/stops/nearby?latitude=${lat}&longitude=${lng}&results=3&distance=600`, 6_000
     );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json() as Array<{ id: string }>;
     const id = data?.[0]?.id ?? null;
-    dbStopIdCache.set(key, id);
+    dbStopIdCache.set(key, { id, ts: Date.now() });
     return id;
   } catch {
-    dbStopIdCache.set(key, null);
+    dbStopIdCache.set(key, { id: null, ts: Date.now() });
     return null;
   }
 }
@@ -366,9 +404,10 @@ async function fetchDbDelay(stopId: string, line: string, plannedDep: Date): Pro
   const cached = dbDelayCache.get(key);
   if (cached && Date.now() - cached.ts < 4 * 60 * 1000) return cached.delayMin;
   try {
-    const res = await fetch(
-      `${DB_REST}/stops/${stopId}/departures?when=${plannedDep.toISOString()}&duration=12&results=40`
+    const res = await fetchT(
+      `${DB_REST}/stops/${stopId}/departures?when=${plannedDep.toISOString()}&duration=12&results=40`, 6_000
     );
+    if (!res.ok) return 0;
     const data = await res.json() as {
       departures?: Array<{ line?: { name?: string }; plannedWhen?: string; delay?: number }>;
     };
@@ -489,6 +528,9 @@ async function findScheduledBuses(gtfs: GtfsData, now: Date): Promise<Bus[]> {
 export async function enrichBusDelays(buses: Bus[]): Promise<Bus[]> {
   const now = new Date();
   return Promise.all(buses.map(async (bus) => {
+    // Nur reine Fahrplan-Züge (negative tripId) – VAG-Busse haben schon Echtzeit.
+    // DB-Werte darüberzulegen ließ sie alle 15 s zwischen zwei Positionen springen.
+    if (bus.tripId >= 0) return bus;
     const refStop =
       bus.stops.find((s) => stopInZirndorf(s.lat, s.lng) && s.departureSoll != null && s.departureSoll >= now) ??
       bus.stops.find((s) => stopInZirndorf(s.lat, s.lng)) ??
@@ -637,6 +679,8 @@ export async function fetchAllBuses(stops: Stop[], gtfs?: GtfsData): Promise<Bus
       console.log(`[filter] skipping trip ${tripId} line=${info.line} (no Zirndorf stop); bbox check on ${route.stops.length} stops, sample: ${JSON.stringify(route.stops[0])}`);
       continue;
     }
+    // Linien außerhalb des GTFS-Katalogs nur, wenn sie wirklich im Zirndorfer Raum halten
+    if (gtfs && !gtfs.lineInfo[info.line] && !route.stops.some((s) => stopInStopAreas(s.name))) continue;
     const pos = interpolatePosition(route.stops, now);
     if (!pos) {
       console.log(`[interp] no position for trip ${tripId} line=${info.line}, stops=${route.stops.length}, first=${route.stops[0]?.departureSoll?.toISOString()}, last=${route.stops[route.stops.length-1]?.departureSoll?.toISOString()}, now=${now.toISOString()}`);

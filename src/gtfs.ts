@@ -28,11 +28,20 @@ export interface GtfsRouteShape {
   tripDepartures?: Array<Array<{ dep: number; headsign: string; startIdx?: number }>>;
 }
 
+export interface GtfsPollStop {
+  vgnId: number;
+  name: string;
+  lat: number;
+  lng: number;
+}
+
 export interface GtfsData {
   generated: string;
   stopsByVgnId: Record<string, GtfsStop>;
   lineInfo: Record<string, GtfsLineInfo>;
   routeShapes: Record<string, GtfsRouteShape>;
+  /** Minimal stop set whose departure boards see every bus trip (see build-gtfs.ts) */
+  pollStops?: GtfsPollStop[];
 }
 
 // ── IndexedDB helpers ─────────────────────────────────────────────────────────
@@ -72,6 +81,7 @@ interface GtfsStopsFile {
   generated: string;
   stopsByVgnId: GtfsData["stopsByVgnId"];
   lineInfo: GtfsData["lineInfo"];
+  pollStops?: GtfsData["pollStops"];
 }
 
 interface GtfsRoutesFile {

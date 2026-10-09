@@ -1,7 +1,7 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { enrichBusDelays, evictSegmentCache, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, refreshPositions, stopInZirndorf } from "./api";
+import { enrichBusDelays, evictSegmentCache, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, pollStopsFromGtfs, refreshPositions, stopInZirndorf } from "./api";
 import {
   buildCoordRanges,
   loadGtfsData,
@@ -375,6 +375,8 @@ export default function App() {
   // Track when each trip was last seen to avoid flickering on refresh
   const busLastSeenRef = useRef<Map<number, number>>(new Map());
   const gtfsRef = useRef<GtfsData | null>(null);
+  const stopsRequestedRef = useRef(false);
+  const refreshInFlightRef = useRef(false);
 
   // ── Init map ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -394,18 +396,29 @@ export default function App() {
 
   // ── Load GTFS data ──────────────────────────────────────────────────────────
   useEffect(() => {
+    // Poll-Haltestellen kommen vorberechnet aus gtfs_stops.json (bei Folgebesuchen
+    // direkt aus IndexedDB); nur bei alten Daten ohne pollStops die PULS-Namenssuche.
+    const initStops = (data: GtfsData | null) => {
+      if (stopsRequestedRef.current) return;
+      stopsRequestedRef.current = true;
+      const pollStops = data ? pollStopsFromGtfs(data) : [];
+      if (pollStops.length) setStops(pollStops);
+      else fetchZirndorfStops().then(setStops);
+    };
     loadGtfsData((partial) => {
       // Fresh network data arrived (different generated timestamp) → clear shape cache
       // so buses are re-matched with the new shapes on next render.
       shapeRangesRef.current.clear();
       setGtfs(partial); gtfsRef.current = partial;
+      initStops(partial);
     }).then((full) => {
       // If routes weren't available yet (first network load), re-fetch buses now so
       // lines that needed GTFS fallback (fetchTripRoute failed) appear immediately.
       const hadRoutes = Object.keys(gtfsRef.current?.routeShapes ?? {}).length > 0;
       setGtfs(full); gtfsRef.current = full;
+      initStops(full);
       if (!hadRoutes && stopsRef.current.length) refresh(stopsRef.current);
-    });
+    }).catch(() => initStops(null));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -514,14 +527,13 @@ export default function App() {
     }
   }, [pois, poisVisible]);
 
-  // ── Load stops ──────────────────────────────────────────────────────────────
-  useEffect(() => {
-    fetchZirndorfStops().then(setStops);
-  }, []);
-
   // ── Full data refresh ───────────────────────────────────────────────────────
   const refresh = useCallback(async (currentStops: Stop[]) => {
     if (!currentStops.length) return;
+    // Keine überlappenden Läufe: eine langsame ältere Antwort würde sonst eine
+    // neuere überschreiben und die Fahrzeuge zurückspringen lassen
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     try {
       const fresh = await fetchAllBuses(currentStops, gtfsRef.current ?? undefined);
       const now = Date.now();
@@ -546,6 +558,7 @@ export default function App() {
     } catch {
       setError("API nicht erreichbar");
     } finally {
+      refreshInFlightRef.current = false;
       setLoading(false);
     }
   }, []);
@@ -750,7 +763,7 @@ export default function App() {
       {overlayVisible && (
         <div className={`loading-overlay${overlayFading ? " fading" : ""}`}>
           <div className="loading-card">
-            <img src="/oz-logo.png" alt="OpenZirndorf" className="loading-logo" />
+            <img src="/oz-logo-192.png" alt="OpenZirndorf" className="loading-logo" />
             <h1 className="loading-title">Zirndorf Mobil</h1>
             <p className="loading-subtitle">Busse &amp; Bahnen in Echtzeit</p>
             <div className="loading-bus-track">
