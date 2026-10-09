@@ -520,7 +520,8 @@ export default function App() {
     stopMarkersDataRef.current = [];
     if (!stopsVisible) { stopLayerRef.current.remove(); return; }
     stopLayerRef.current.addTo(map);
-    const renderer = stopRendererRef.current ??= L.canvas({ padding: 0.3 });
+    // tolerance: größere Trefferfläche, damit kleine Haltestellen auf dem Handy antippbar bleiben
+    const renderer = stopRendererRef.current ??= L.canvas({ padding: 0.3, tolerance: L.Browser.mobile ? 10 : 3 });
 
     for (const [vgnId, stop] of Object.entries(gtfs.stopsByVgnId)) {
       const vgnIdNum = parseInt(vgnId);
