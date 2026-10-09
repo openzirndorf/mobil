@@ -34,7 +34,12 @@
 - 🗓️ **Fahrplaninterpolation** für S-Bahn, Regionalbahn und Busfahrten, die PULS nicht kennt (GTFS-basiert)
 - 🛤️ **Schienenstrecken** exakt entlang der OSM-Gleisgeometrie
 - 🏠 **Haltestellenabfahrten** per Klick auf jede Haltestelle (PULS mit Echtzeit, sonst Fahrplan aus der VGN-EFA)
-- 📲 **Installierbar (PWA)** – App-Shell, Kartenkacheln und Schriften werden gecacht
+- 📍 **Haltestellen in meiner Nähe** – Standort wird nur lokal ausgewertet, nie übertragen
+- ⭐ **Meine Haltestellen** merken und **Linien filtern** (nur lokal im Browser gespeichert)
+- 🔗 **Teilbare Links** zu Haltestellen: `mobil.openzirndorf.de/#halt=<VGN-ID>` (z. B. für QR-Codes)
+- 🌙 **Dunkelmodus** (folgt der System-Einstellung), Tastaturbedienung und Screenreader-Beschriftungen
+- 📲 **Installierbar (PWA)** – App-Shell und Kartenkacheln werden gecacht
+- 🔒 **Keine Verbindung zu Google** – Schriften (Inter, Montserrat, OFL) werden selbst ausgeliefert
 - 📍 **POI-Layer:** Bushaltestellen, P+R, Fahrrad, Taxi, WC
 - ⚠️ **Störungsbanner** bei Linien mit hoher Durchschnittsverspätung
 

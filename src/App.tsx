@@ -18,6 +18,8 @@ import fahrradImgUrl from "./assets/fahrrad.png";
 import prImgUrl from "./assets/pr.png";
 import haltestelleImgUrl from "./assets/haltestelle.png";
 import wcImgUrl from "./assets/wc.png";
+import { formatDistance, nearestStops, type NearbyStop } from "./nearby";
+import { loadJson, saveJson } from "./storage";
 import "./App.css";
 
 const ZIRNDORF = { lat: 49.4415, lng: 10.955 };
@@ -333,6 +335,19 @@ function makePoiIcon(type: Poi["type"], toiletType?: Poi["toiletType"]): L.DivIc
   return L.divIcon({ className: "", html, iconAnchor: [s / 2, s] });
 }
 
+// ── Kleine Inline-Icons (statt Emoji – die fehlen auf manchen Systemen) ────────
+const PinIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
+    <path d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7Zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5Z" />
+  </svg>
+);
+const LinkIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+    <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5" />
+    <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5" />
+  </svg>
+);
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -373,8 +388,12 @@ export default function App() {
     departures: StopDeparture[];
   } | null>(null);
 
-  const openStop = (vgnId: number, stop: GtfsStop) => {
+  const openStop = (vgnId: number, stop: GtfsStop, opts: { focus?: boolean } = {}) => {
     setSelectedBus(null);
+    if (opts.focus) {
+      mapInstance.current?.setView([stop.lat, stop.lng], Math.max(mapInstance.current.getZoom(), 16), { animate: true });
+      setSidebarOpen(true);
+    }
     setSelectedStop({ vgnId, name: stop.name, loading: true, departures: [] });
     const onlyIfCurrent = (next: NonNullable<typeof selectedStop>) =>
       setSelectedStop((prev) => prev?.vgnId === vgnId ? next : prev);
@@ -382,6 +401,72 @@ export default function App() {
       .then(({ source, departures }) => onlyIfCurrent({ vgnId, name: stop.name, loading: false, source, departures }))
       .catch(() => onlyIfCurrent({ vgnId, name: stop.name, loading: false, error: true, departures: [] }));
   };
+  // Gemerkte Haltestellen + Linienfilter: nur lokal im Browser (src/storage.ts)
+  const [favorites, setFavorites] = useState<Array<{ vgnId: number; name: string }>>(() => loadJson("zm.favorites", []));
+  const [lineFilter, setLineFilter] = useState<string[]>(() => loadJson("zm.lineFilter", []));
+  useEffect(() => saveJson("zm.favorites", favorites), [favorites]);
+  useEffect(() => saveJson("zm.lineFilter", lineFilter), [lineFilter]);
+  const isFavorite = (vgnId: number) => favorites.some((f) => f.vgnId === vgnId);
+  const toggleFavorite = (vgnId: number, name: string) =>
+    setFavorites((prev) => prev.some((f) => f.vgnId === vgnId)
+      ? prev.filter((f) => f.vgnId !== vgnId)
+      : [...prev, { vgnId, name }]);
+  const toggleLine = (line: string) =>
+    setLineFilter((prev) => prev.includes(line) ? prev.filter((l) => l !== line) : [...prev, line]);
+
+  // "Haltestellen in meiner Nähe": Standort nur auf Knopfdruck, Auswertung nur lokal
+  const [nearby, setNearby] = useState<{ state: "idle" | "locating" | "done" | "error"; stops: NearbyStop[]; message?: string }>({ state: "idle", stops: [] });
+  const userMarkerRef = useRef<L.CircleMarker | null>(null);
+  const locate = () => {
+    if (!navigator.geolocation) {
+      setNearby({ state: "error", stops: [], message: "Dein Browser unterstützt keine Standortabfrage." });
+      return;
+    }
+    setNearby({ state: "locating", stops: [] });
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude: lat, longitude: lng } = pos.coords;
+        const data = gtfsRef.current;
+        setNearby({ state: "done", stops: data ? nearestStops(data, lat, lng) : [] });
+        const map = mapInstance.current;
+        if (map) {
+          userMarkerRef.current?.remove();
+          userMarkerRef.current = L.circleMarker([lat, lng], {
+            radius: 8, color: "#fff", weight: 3, fillColor: "#2563EB", fillOpacity: 1,
+          }).bindTooltip("Dein Standort").addTo(map);
+          map.setView([lat, lng], 16, { animate: true });
+        }
+      },
+      (err) => setNearby({
+        state: "error", stops: [],
+        message: err.code === err.PERMISSION_DENIED
+          ? "Standortfreigabe abgelehnt – bitte in den Browser-Einstellungen erlauben."
+          : "Standort konnte nicht ermittelt werden.",
+      }),
+      { enableHighAccuracy: false, timeout: 10_000, maximumAge: 60_000 },
+    );
+  };
+
+  // Teilbare Links: #halt=<VGN-ID> öffnet die Haltestelle (z. B. für QR-Codes an Haltestellen)
+  const [shareNote, setShareNote] = useState<string | null>(null);
+  // Detailansicht (Haltestelle/Fahrzeug) beim Öffnen in den sichtbaren Bereich der Sidebar holen
+  const detailRef = useRef<HTMLDivElement>(null);
+  const shareStop = async (vgnId: number, name: string) => {
+    const url = `${location.origin}${location.pathname}#halt=${vgnId}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: `${name} – Zirndorf Mobil`, url });
+        return;
+      }
+      await navigator.clipboard.writeText(url);
+      setShareNote("Link kopiert");
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return; // Teilen-Dialog abgebrochen
+      setShareNote(url);
+    }
+    setTimeout(() => setShareNote(null), 4_000);
+  };
+
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -467,6 +552,46 @@ export default function App() {
     }).catch(() => initStops(null));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Teilbare Links: #halt=<VGN-ID> ↔ geöffnete Haltestelle ─────────────────
+  const hashHandledRef = useRef(false);
+  const openStopFromHash = () => {
+    const m = location.hash.match(/^#halt=(\d+)$/);
+    const stop = m ? gtfsRef.current?.stopsByVgnId[m[1]] : undefined;
+    if (m && stop) openStop(parseInt(m[1]), stop, { focus: true });
+  };
+  useEffect(() => {
+    if (!gtfs || hashHandledRef.current) return;
+    hashHandledRef.current = true;
+    openStopFromHash();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gtfs]);
+  useEffect(() => {
+    const onHash = () => openStopFromHash();
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const selectedStopId = selectedStop?.vgnId;
+  const selectedTripId = selectedBus?.tripId;
+  useEffect(() => {
+    if (selectedStopId != null || selectedTripId != null) {
+      detailRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [selectedStopId, selectedTripId]);
+  useEffect(() => {
+    if (!disclaimerOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setDisclaimerOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [disclaimerOpen]);
+  useEffect(() => {
+    // Erst nach dem Auswerten des Start-Hashs synchronisieren, sonst wäre er schon weg
+    if (!hashHandledRef.current) return;
+    const want = selectedStopId != null ? `#halt=${selectedStopId}` : "";
+    if (location.hash === want) return;
+    history.replaceState(null, "", want || location.pathname + location.search);
+  }, [selectedStopId]);
 
   // ── Fetch P+R / POI from Overpass – lazy: only on first POI-layer activation ──
   useEffect(() => {
@@ -630,7 +755,9 @@ export default function App() {
     const map = mapInstance.current;
     if (!map) return;
 
-    const activeIds = new Set(buses.map((b) => b.tripId));
+    // Linienfilter: ausgeblendete Linien wie beendete Fahrten behandeln (Marker + Linie weg)
+    const shown = lineFilter.length ? buses.filter((b) => lineFilter.includes(b.line)) : buses;
+    const activeIds = new Set(shown.map((b) => b.tripId));
     for (const [id, m] of busMarkersRef.current) {
       if (!activeIds.has(id)) { m.remove(); busMarkersRef.current.delete(id); busIconKeyRef.current.delete(id); }
     }
@@ -639,7 +766,7 @@ export default function App() {
     }
 
     const staticNotices = activeNotices();
-    for (const bus of buses) {
+    for (const bus of shown) {
       if (!bus.position) continue;
       const color = delayColor(bus.delayMinutes);
 
@@ -766,7 +893,7 @@ export default function App() {
         );
       }
     }
-  }, [buses, gtfs]);
+  }, [buses, gtfs, lineFilter]);
 
   useEffect(() => {
     setSelectedBus((prev) => {
@@ -783,6 +910,10 @@ export default function App() {
   };
 
   const activeBuses = buses.filter((b) => b.position !== null);
+  const visibleBuses = lineFilter.length ? activeBuses.filter((b) => lineFilter.includes(b.line)) : activeBuses;
+  // Filter-Chips: aktuell fahrende Linien + gewählte (damit man sie wieder abwählen kann)
+  const filterLines = [...new Set([...activeBuses.map((b) => b.line), ...lineFilter])]
+    .sort((a, b) => a.localeCompare(b, "de", { numeric: true }));
 
   const nextStopTime = (bus: Bus): Date | null => {
     if (!bus.nextStop) return null;
@@ -818,7 +949,7 @@ export default function App() {
   return (
     <div className="layout">
       {overlayVisible && (
-        <div className={`loading-overlay${overlayFading ? " fading" : ""}`}>
+        <div className={`loading-overlay${overlayFading ? " fading" : ""}`} role="status" aria-label="Zirndorf Mobil wird geladen">
           <div className="loading-card">
             <img src="/oz-logo-192.png" alt="OpenZirndorf" className="loading-logo" />
             <h1 className="loading-title">Zirndorf Mobil</h1>
@@ -837,7 +968,7 @@ export default function App() {
       )}
 
       <div className="map-wrap">
-        <div ref={mapRef} className="map" />
+        <div ref={mapRef} className="map" role="region" aria-label="Karte mit Fahrzeugen und Haltestellen" />
         <div className="beta-ribbon">Beta</div>
       </div>
 
@@ -846,19 +977,22 @@ export default function App() {
         className={`sidebar-toggle ${sidebarOpen ? "open" : ""}`}
         onClick={() => setSidebarOpen((v) => !v)}
         title={sidebarOpen ? "Seitenleiste einklappen" : "Seitenleiste ausklappen"}
+        aria-label={sidebarOpen ? "Seitenleiste einklappen" : "Seitenleiste ausklappen"}
+        aria-expanded={sidebarOpen}
+        aria-controls="sidebar"
       >
         <span className="sidebar-toggle-desktop">{sidebarOpen ? "›" : "‹"}</span>
         <span className="sidebar-toggle-mobile">{sidebarOpen ? "▼ Schließen" : "▲ Linien & Abfahrten"}</span>
       </button>
 
-      <aside className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
+      <aside id="sidebar" className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
         <div className="sidebar-header">
           <div>
             <a href="https://openzirndorf.de" target="_blank" rel="noopener noreferrer" className="sidebar-brand"><span className="sidebar-brand-dot" />OpenZirndorf</a>
             <h1>Zirndorf Mobil</h1>
             <p className="subtitle">Busse &amp; Bahnen in Echtzeit</p>
           </div>
-          <div className="meta">
+          <div className="meta" aria-live="polite">
             {loading && <span className="badge loading">Lade…</span>}
             {error && <span className="badge error">{error}</span>}
             {lastUpdate && !loading && !error && (
@@ -879,6 +1013,7 @@ export default function App() {
           <button
             type="button"
             className={`poi-toggle ${stopsVisible ? "active" : ""}`}
+            aria-pressed={stopsVisible}
             onClick={() => setStopsVisible((v) => !v)}
             title="Bushaltestellen ein-/ausblenden"
           >
@@ -887,6 +1022,7 @@ export default function App() {
           <button
             type="button"
             className={`poi-toggle ${poisVisible.park_ride ? "active" : ""}`}
+            aria-pressed={poisVisible.park_ride}
             onClick={() => setPoisVisible((v) => ({ ...v, park_ride: !v.park_ride }))}
             title="P+R Parkplätze ein-/ausblenden"
           >
@@ -895,6 +1031,7 @@ export default function App() {
           <button
             type="button"
             className={`poi-toggle ${poisVisible.bicycle_parking ? "active" : ""}`}
+            aria-pressed={poisVisible.bicycle_parking}
             onClick={() => setPoisVisible((v) => ({ ...v, bicycle_parking: !v.bicycle_parking }))}
             title="Fahrradabstellplätze ein-/ausblenden"
           >
@@ -903,6 +1040,7 @@ export default function App() {
           <button
             type="button"
             className={`poi-toggle ${poisVisible.taxi ? "active" : ""}`}
+            aria-pressed={poisVisible.taxi}
             onClick={() => setPoisVisible((v) => ({ ...v, taxi: !v.taxi }))}
             title="Taxistände ein-/ausblenden"
           >
@@ -911,6 +1049,7 @@ export default function App() {
           <button
             type="button"
             className={`poi-toggle ${poisVisible.toilets ? "active" : ""}`}
+            aria-pressed={poisVisible.toilets}
             onClick={() => setPoisVisible((v) => ({ ...v, toilets: !v.toilets }))}
             title="Öffentliche Toiletten ein-/ausblenden"
           >
@@ -945,46 +1084,75 @@ export default function App() {
           </div>
         )}
 
-        {activeBuses.length === 0 && !loading && (
-          <div className="empty">Gerade keine Busse in Zirndorf unterwegs</div>
-        )}
+        <div className="quick-section">
+          <button
+            type="button"
+            className="nearby-btn"
+            onClick={locate}
+            disabled={!gtfs || nearby.state === "locating"}
+          >
+            <PinIcon /> {nearby.state === "locating" ? "Standort wird ermittelt…" : "Haltestellen in meiner Nähe"}
+          </button>
+          {nearby.state === "error" && <div className="quick-note" role="alert">{nearby.message}</div>}
+          {nearby.state === "done" && (nearby.stops.length === 0
+            ? <div className="quick-note">Keine Haltestelle im Umkreis von 2 km.</div>
+            : (
+              <ul className="quick-list" aria-label="Haltestellen in der Nähe">
+                {nearby.stops.map((n) => (
+                  <li key={n.vgnId}>
+                    <button type="button" className="quick-item" onClick={() => gtfs && openStop(n.vgnId, gtfs.stopsByVgnId[n.vgnId], { focus: true })}>
+                      <span className="quick-name">{n.name}</span>
+                      <span className="quick-meta">{formatDistance(n.distanceM)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ))}
+          {favorites.length > 0 && (
+            <>
+              <div className="quick-title">Meine Haltestellen</div>
+              <ul className="quick-list" aria-label="Meine Haltestellen">
+                {favorites.map((f) => (
+                  <li key={f.vgnId}>
+                    <button
+                      type="button"
+                      className="quick-item"
+                      onClick={() => { const st = gtfs?.stopsByVgnId[f.vgnId]; if (st) openStop(f.vgnId, st, { focus: true }); }}
+                    >
+                      <span className="quick-name">★ {f.name}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
 
-        <ul className="bus-list">
-          {activeBuses.map((bus) => {
-            const info = gtfs?.lineInfo[bus.line];
-            return (
-              <li
-                key={bus.tripId}
-                className={`bus-item ${selectedBus?.tripId === bus.tripId ? "selected" : ""}`}
-                onClick={() => focusBus(bus)}
-              >
-                <div className="line-badge" style={{ background: delayColor(bus.delayMinutes) }}>
-                  {bus.line}
-                </div>
-                <div className="bus-info">
-                  <span className="direction">→ {bus.direction}</span>
-                  {bus.nextStop && <span className="next-stop">nächste: {bus.nextStop}</span>}
-                  {info && (
-                    <span className="line-type">{routeTypeLabel(info.type)}</span>
-                  )}
-                </div>
-                <div className="delay">
-                  {(() => { const t = nextStopTime(bus); const s = t && fmtNextStop(t); return s ? <span className="next-stop-time">{s}</span> : null; })()}
-                  <span style={{ color: delayColor(bus.delayMinutes) }}>{delayLabel(bus.delayMinutes)}</span>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-
+        <div ref={detailRef}>
         {selectedStop && (
           <div className="trip-detail">
             <div className="trip-header">
               <strong style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {selectedStop.name}
               </strong>
-              <button type="button" className="close-btn" onClick={() => setSelectedStop(null)}>✕</button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-pressed={isFavorite(selectedStop.vgnId)}
+                aria-label={isFavorite(selectedStop.vgnId) ? "Aus meinen Haltestellen entfernen" : "Haltestelle merken"}
+                title={isFavorite(selectedStop.vgnId) ? "Aus meinen Haltestellen entfernen" : "Haltestelle merken"}
+                onClick={() => toggleFavorite(selectedStop.vgnId, selectedStop.name)}
+              >{isFavorite(selectedStop.vgnId) ? "★" : "☆"}</button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Link zu dieser Haltestelle teilen"
+                title="Link teilen"
+                onClick={() => shareStop(selectedStop.vgnId, selectedStop.name)}
+              ><LinkIcon /></button>
+              <button type="button" className="close-btn" aria-label="Schließen" onClick={() => setSelectedStop(null)}>✕</button>
             </div>
+            {shareNote && <div className="stop-source-note" role="status">{shareNote}</div>}
             {selectedStop.source === "efa" && !selectedStop.loading && (
               <div className="stop-source-note">Fahrplanzeiten ohne Echtzeit (Quelle: VGN)</div>
             )}
@@ -1022,7 +1190,7 @@ export default function App() {
               <div className="trip-header">
                 <strong>Linie {selectedBus.line}</strong>
                 <span className="trip-dir">→ {selectedBus.direction}</span>
-                <button type="button" className="close-btn" onClick={() => setSelectedBus(null)}>✕</button>
+                <button type="button" className="close-btn" aria-label="Schließen" onClick={() => setSelectedBus(null)}>✕</button>
               </div>
               {info && (
                 <div className="trip-fullname">{info.name}</div>
@@ -1058,6 +1226,68 @@ export default function App() {
             </div>
           );
         })()}
+        </div>
+
+        {/* Bei aktivem Filter immer sichtbar – sonst wäre eine leere Liste unerklärlich */}
+        {(filterLines.length > 1 || lineFilter.length > 0) && (
+          <div className="line-filter" role="group" aria-label="Linien filtern">
+            <button
+              type="button"
+              className={`line-chip ${lineFilter.length === 0 ? "active" : ""}`}
+              aria-pressed={lineFilter.length === 0}
+              onClick={() => setLineFilter([])}
+            >Alle</button>
+            {filterLines.map((l) => (
+              <button
+                key={l}
+                type="button"
+                className={`line-chip ${lineFilter.includes(l) ? "active" : ""}`}
+                aria-pressed={lineFilter.includes(l)}
+                onClick={() => toggleLine(l)}
+              >{l}</button>
+            ))}
+          </div>
+        )}
+
+        {activeBuses.length === 0 && !loading && (
+          <div className="empty">Gerade keine Busse in Zirndorf unterwegs</div>
+        )}
+        {activeBuses.length > 0 && visibleBuses.length === 0 && (
+          <div className="empty">Gerade keine Fahrzeuge der gewählten Linien unterwegs</div>
+        )}
+
+        <ul className="bus-list">
+          {visibleBuses.map((bus) => {
+            const info = gtfs?.lineInfo[bus.line];
+            return (
+              <li
+                key={bus.tripId}
+                className={`bus-item ${selectedBus?.tripId === bus.tripId ? "selected" : ""}`}
+                onClick={() => focusBus(bus)}
+                role="button"
+                tabIndex={0}
+                aria-current={selectedBus?.tripId === bus.tripId ? "true" : undefined}
+                aria-label={`Linie ${bus.line} Richtung ${bus.direction}, ${delayLabel(bus.delayMinutes)}`}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); focusBus(bus); } }}
+              >
+                <div className="line-badge" style={{ background: delayColor(bus.delayMinutes) }}>
+                  {bus.line}
+                </div>
+                <div className="bus-info">
+                  <span className="direction">→ {bus.direction}</span>
+                  {bus.nextStop && <span className="next-stop">nächste: {bus.nextStop}</span>}
+                  {info && (
+                    <span className="line-type">{routeTypeLabel(info.type)}</span>
+                  )}
+                </div>
+                <div className="delay">
+                  {(() => { const t = nextStopTime(bus); const s = t && fmtNextStop(t); return s ? <span className="next-stop-time">{s}</span> : null; })()}
+                  <span style={{ color: delayColor(bus.delayMinutes) }}>{delayLabel(bus.delayMinutes)}</span>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
 
         <footer className="sidebar-footer">
           <div className="footer-links">
@@ -1069,10 +1299,14 @@ export default function App() {
             {" · "}
             <a href="https://openzirndorf.de/impressum" target="_blank" rel="noopener noreferrer">Impressum</a>
             {" · "}
+            <a href="https://openzirndorf.de/datenschutz" target="_blank" rel="noopener noreferrer">Datenschutz</a>
+            {" · "}
             <button type="button" className="disclaimer-btn" onClick={() => setDisclaimerOpen(true)}>Hinweis ⓘ</button>
           </div>
           <div className="footer-bottom">
-            <a href="https://openzirndorf.de" target="_blank" rel="noopener noreferrer">OpenZirndorf</a>
+            <a href="https://openzirndorf.de" target="_blank" rel="noopener noreferrer">OpenZirndorf e.V.</a>
+            {" · "}
+            <a href="https://openzirndorf.de/beitritt" target="_blank" rel="noopener noreferrer">Mitglied werden</a>
             {" · "}
             <a href="https://portal.openzirndorf.de" target="_blank" rel="noopener noreferrer">Alle Apps →</a>
             {" · "}Made with ❤️ in Zirndorf
@@ -1081,14 +1315,14 @@ export default function App() {
 
         {disclaimerOpen && (
           <div className="disclaimer-backdrop" onClick={() => setDisclaimerOpen(false)}>
-            <div className="disclaimer-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="disclaimer-modal" role="dialog" aria-modal="true" aria-labelledby="disclaimer-title" onClick={(e) => e.stopPropagation()}>
               <div className="disclaimer-header">
-                <strong>Hinweise &amp; Quellen</strong>
-                <button type="button" className="close-btn" onClick={() => setDisclaimerOpen(false)}>✕</button>
+                <strong id="disclaimer-title">Hinweise &amp; Quellen</strong>
+                <button type="button" className="close-btn" aria-label="Schließen" onClick={() => setDisclaimerOpen(false)}>✕</button>
               </div>
               <div className="disclaimer-body">
                 <p>
-                  <strong>Zirndorf Mobil</strong> ist ein OpenZirndorf-Projekt und stellt Echtzeitdaten
+                  <strong>Zirndorf Mobil</strong> ist ein Projekt des <strong>OpenZirndorf e.V.</strong> und stellt Echtzeitdaten
                   des öffentlichen Nahverkehrs im Raum Zirndorf visuell dar. Wir erheben selbst keine
                   Fahrzeugdaten, sondern nutzen ausschließlich öffentlich zugängliche Quellen:
                 </p>
@@ -1096,8 +1330,21 @@ export default function App() {
                   <li><a href="https://opendata.vag.de" target="_blank" rel="noopener noreferrer">VAG PULS API</a> – Echtzeit-Abfahrten &amp; Verspätungen (VAG Nürnberg)</li>
                   <li><a href="https://www.vgn.de/web-entwickler/open-data/" target="_blank" rel="noopener noreferrer">VGN GTFS-Daten</a> – Fahrpläne, Haltestellen, Linienverläufe</li>
                   <li><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> – Kartenmaterial &amp; Streckenverlauf (© OSM-Mitwirkende)</li>
-                  <li><a href="https://overpass-api.de" target="_blank" rel="noopener noreferrer">Overpass API</a> – POI-Daten (P+R, Fahrradstellplätze, Taxistände)</li>
+                  <li><a href="https://www.vgn.de/web-entwickler/open-data/" target="_blank" rel="noopener noreferrer">VGN EFA</a> – Fahrplan-Abfahrten an Haltestellen ohne VAG-Echtzeit</li>
+                  <li><a href="https://v6.db.transport.rest" target="_blank" rel="noopener noreferrer">DB REST API</a> – Verspätungen von S-Bahn &amp; Regionalzügen (sofern erreichbar)</li>
+                  <li><a href="https://overpass-api.de" target="_blank" rel="noopener noreferrer">Overpass API</a> – POI-Daten (P+R, Fahrradstellplätze, Taxistände, WC)</li>
+                  <li><a href="https://project-osrm.org" target="_blank" rel="noopener noreferrer">OSRM</a> – Straßenverlauf für Linien ohne vorberechnete Strecke</li>
                 </ul>
+                <p>
+                  Wir erheben über die App keine personenbezogenen Daten und setzen keine Cookies. Für Karte
+                  und Live-Daten fragt dein Browser direkt bei den oben genannten Diensten an. Fahrplandaten,
+                  App-Dateien und gemerkte Haltestellen bleiben lokal in deinem Browser. Details in der <a href="https://openzirndorf.de/datenschutz" target="_blank" rel="noopener noreferrer">Datenschutzerklärung</a>.
+                </p>
+                <p>
+                  Dir gefällt die App? OpenZirndorf ist ein ehrenamtlicher Verein aus Zirndorf –{" "}
+                  <a href="https://openzirndorf.de/beitritt" target="_blank" rel="noopener noreferrer">werde Mitglied</a>{" "}
+                  oder bring dich auf <a href="https://github.com/openzirndorf/mobil" target="_blank" rel="noopener noreferrer">GitHub</a> ein.
+                </p>
                 <p className="disclaimer-note">
                   <strong>Wichtig:</strong> Die Fahrzeugpositionen werden <em>interpoliert</em> –
                   berechnet aus Abfahrts- und Ankunftszeiten laut Fahrplan sowie gemeldeten Verspätungen.

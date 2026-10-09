@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     react(),
     // Service Worker: App-Shell aus dem Cache (Folgebesuche starten ohne Netz-
-    // Roundtrip), Kartenkacheln + Schriften gecacht. Echtzeit-APIs und die
+    // Roundtrip), Kartenkacheln gecacht. Echtzeit-APIs und die
     // GTFS-JSONs gehen weiter direkt ans Netz – letztere cacht gtfs.ts selbst in
     // IndexedDB (stale-while-revalidate), ein zweiter Cache davor würde nur
     // Updates verzögern.
@@ -33,8 +33,9 @@ export default defineConfig({
         clientsClaim: true,
         skipWaiting: true,
         globPatterns: ['**/*.{js,css,html,png,svg,woff2}'],
-        // Original-Logo (1 MB) nur für README/Sharepic
-        globIgnores: ['**/oz-logo.png', '**/gtfs_*.json'],
+        // Original-Logo (1 MB) nur für README/Sharepic; latin-ext-Schriften lädt der
+        // Browser nur bei Bedarf (Zeichen außerhalb Latin-1)
+        globIgnores: ['**/oz-logo.png', '**/gtfs_*.json', '**/*-latin-ext-*.woff2'],
         navigateFallback: '/index.html',
         runtimeCaching: [
           {
@@ -43,15 +44,6 @@ export default defineConfig({
             options: {
               cacheName: 'osm-tiles',
               expiration: { maxEntries: 800, maxAgeSeconds: 7 * 24 * 3600 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'google-fonts',
-              expiration: { maxEntries: 20, maxAgeSeconds: 365 * 24 * 3600 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },

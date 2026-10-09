@@ -20,6 +20,12 @@
   --oz-shadow-sm:         0 1px 3px rgba(0,0,0,0.08);
   --oz-shadow:            0 2px 8px rgba(0,0,0,0.10);
   --oz-transition:        200ms ease;
+  --oz-border:            #E5E7EB;
+  --oz-selected-bg:       #f0fdf0;
+  --oz-chip-active-bg:    #DBEAFE;
+  --oz-chip-active-border:#93C5FD;
+  --oz-chip-active-text:  #1D4ED8;
+  --oz-focus:             #2563EB;
 }
 
 /* ── Reset ────────────────────────────────────────────────────────────────── */
@@ -77,7 +83,11 @@ body {
   background: var(--oz-bg-primary);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* Ganze Sidebar scrollt (vorher nur die Fahrzeugliste – mit Nähe/Favoriten/
+     Filter wäre die auf dem Handy sonst zusammengequetscht) */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-left: 1px solid var(--oz-bg-subtle);
   box-shadow: -2px 0 12px rgba(0,0,0,0.06);
   transition: width var(--oz-transition), min-width var(--oz-transition);
@@ -97,6 +107,9 @@ body {
   align-items: flex-start;
   gap: 8px;
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .sidebar-brand {
@@ -188,8 +201,7 @@ h1 {
 /* ── Bus list ─────────────────────────────────────────────────────────────── */
 .bus-list {
   list-style: none;
-  overflow-y: auto;
-  flex: 1;
+  flex: 1 0 auto;
   padding: 4px 0;
 }
 
@@ -206,7 +218,7 @@ h1 {
 .bus-item:not(:last-child) { border-bottom-color: var(--oz-bg-surface); }
 .bus-item:hover { background: var(--oz-bg-surface); }
 .bus-item.selected {
-  background: #f0fdf0;
+  background: var(--oz-selected-bg);
   border-left-color: var(--oz-brand-green);
 }
 
@@ -378,7 +390,9 @@ h1 {
   background: var(--oz-brand-green);
   box-shadow: 0 0 0 3px rgba(0,154,0,0.2);
 }
-.stop-row.past { color: var(--oz-bg-subtle); }
+.stop-row.past { color: var(--oz-text-secondary); opacity: 0.75; }
+.stop-row:not(.past):not(.current) { color: var(--oz-text-primary); }
+.stop-row.past .stop-time { text-decoration: line-through; }
 
 .stop-dot {
   width: 7px;
@@ -437,6 +451,7 @@ h1 {
   font-size: 0.72rem;
   color: var(--oz-text-secondary);
   flex-shrink: 0;
+  margin-top: auto;
   background: var(--oz-bg-surface);
 }
 .sidebar-footer a { color: var(--oz-text-secondary); text-decoration: none; }
@@ -562,11 +577,11 @@ h1 {
   font-family: var(--oz-font-body);
 }
 .poi-toggle.active {
-  background: #DBEAFE;
-  border-color: #93C5FD;
-  color: #1D4ED8;
+  background: var(--oz-chip-active-bg);
+  border-color: var(--oz-chip-active-border);
+  color: var(--oz-chip-active-text);
 }
-.poi-toggle:hover { background: #DBEAFE; border-color: #93C5FD; color: #1D4ED8; }
+.poi-toggle:hover { background: var(--oz-chip-active-bg); border-color: var(--oz-chip-active-border); color: var(--oz-chip-active-text); }
 
 /* ── Disruption banner ────────────────────────────────────────────────────── */
 .disruption-banner {
@@ -762,7 +777,6 @@ h1 {
     z-index: 500;
     transform: translateY(0);
     transition: transform var(--oz-transition);
-    overflow: hidden;
   }
   .sidebar.collapsed {
     width: 100% !important;
@@ -846,4 +860,143 @@ h1 {
 }
 .zooming .bus-marker {
   transition: none !important;
+}
+
+/* ── Schnellzugriff: Nähe + gemerkte Haltestellen ─────────────────────────── */
+.quick-section {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--oz-border);
+  flex-shrink: 0;
+}
+.nearby-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1.5px solid var(--oz-brand-green);
+  border-radius: var(--oz-radius);
+  background: var(--oz-bg-primary);
+  color: var(--oz-brand-green);
+  font: 600 0.8rem var(--oz-font-body);
+  cursor: pointer;
+  transition: background var(--oz-transition);
+}
+.nearby-btn:hover:not(:disabled) { background: var(--oz-selected-bg); }
+.nearby-btn:disabled { opacity: 0.6; cursor: default; }
+.quick-title {
+  margin: 10px 2px 4px;
+  font: 700 0.68rem var(--oz-font-body);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--oz-text-secondary);
+}
+.quick-note {
+  margin: 6px 2px 0;
+  font-size: 0.75rem;
+  color: var(--oz-text-secondary);
+}
+.quick-list { list-style: none; margin-top: 4px; }
+.quick-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 6px;
+  border: none;
+  border-radius: var(--oz-radius);
+  background: none;
+  color: var(--oz-text-primary);
+  font: 0.8rem var(--oz-font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.quick-item:hover { background: var(--oz-bg-surface); }
+.quick-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-meta { color: var(--oz-text-secondary); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+
+/* ── Linienfilter ─────────────────────────────────────────────────────────── */
+.line-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 4px;
+  flex-shrink: 0;
+}
+.line-chip {
+  min-width: 34px;
+  padding: 3px 8px;
+  border: 1.5px solid var(--oz-bg-subtle);
+  border-radius: var(--oz-radius-full);
+  background: var(--oz-bg-subtle);
+  color: var(--oz-text-secondary);
+  font: 700 0.72rem var(--oz-font-body);
+  cursor: pointer;
+}
+.line-chip.active {
+  background: var(--oz-chip-active-bg);
+  border-color: var(--oz-chip-active-border);
+  color: var(--oz-chip-active-text);
+}
+
+/* ── Icon-Buttons im Haltestellen-Kopf ────────────────────────────────────── */
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--oz-text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--oz-radius);
+  flex-shrink: 0;
+}
+.icon-btn:hover { background: var(--oz-bg-subtle); color: var(--oz-text-primary); }
+.icon-btn[aria-pressed="true"] { color: #D97706; }
+
+/* ── Tastatur-Fokus sichtbar ──────────────────────────────────────────────── */
+button:focus-visible,
+a:focus-visible,
+.bus-item:focus-visible {
+  outline: 2px solid var(--oz-focus);
+  outline-offset: 2px;
+}
+
+/* ── Dunkelmodus (folgt der System-Einstellung) ───────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --oz-text-primary:      #E5E7EB;
+    --oz-text-secondary:    #9CA3AF;
+    --oz-bg-primary:        #111827;
+    --oz-bg-surface:        #1F2937;
+    --oz-bg-subtle:         #374151;
+    --oz-border:            #374151;
+    --oz-selected-bg:       #14301a;
+    --oz-chip-active-bg:    #1E3A8A;
+    --oz-chip-active-border:#3B82F6;
+    --oz-chip-active-text:  #DBEAFE;
+    --oz-focus:             #60A5FA;
+    --oz-shadow-sm:         0 1px 3px rgba(0,0,0,0.5);
+    --oz-shadow:            0 2px 8px rgba(0,0,0,0.5);
+  }
+  .nearby-btn { color: #4ADE80; border-color: #22C55E; }
+  /* Kartenkacheln abdunkeln (Farben invertiert, Farbton zurückgedreht) */
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9); }
+  .leaflet-container { background: #1a1d21; }
+  .leaflet-control-zoom a,
+  .leaflet-control-attribution {
+    background: var(--oz-bg-surface) !important;
+    color: var(--oz-text-primary) !important;
+  }
+  .leaflet-control-attribution a { color: #93C5FD !important; }
+  .leaflet-tooltip {
+    background: var(--oz-bg-surface);
+    color: var(--oz-text-primary);
+    border-color: var(--oz-bg-subtle);
+  }
+  .leaflet-tooltip-top::before { border-top-color: var(--oz-bg-surface); }
+  .loading-overlay { background: rgba(17, 24, 39, 0.7); }
+  .disruption-banner { background: #3a2a0a; border-bottom-color: #78350F; }
+  .disruption-body, .disruption-link { color: #FCD34D; }
+  .disclaimer-note { background: #3a2a0a; border-color: #78350F; color: #FCD34D; }
+  .trip-next-stop { background: var(--oz-bg-surface); border-color: var(--oz-border); }
+  .trip-next-time { color: #4ADE80; }
 }
