@@ -6,6 +6,10 @@ export interface GtfsStop {
   lng: number;
   /** All individual platform positions (Steige) for this stop */
   steige?: Array<{ lat: number; lng: number }>;
+  /** Global stop ID (DHID), e.g. "de:09573:5500" – used for VGN EFA */
+  gid?: string;
+  /** false when the VAG PULS API doesn't know this stop → departures from EFA */
+  puls?: false;
 }
 
 export interface GtfsLineInfo {
@@ -25,7 +29,7 @@ export interface GtfsRouteShape {
   stopNames?: string[];
   stopTimes?: number[]; // seconds from midnight per stop, parallel to stopCoords
   /** Departure times + headsigns per day (0=Sun…6=Sat), each sorted ascending by dep */
-  tripDepartures?: Array<Array<{ dep: number; headsign: string; startIdx?: number }>>;
+  tripDepartures?: Array<Array<{ dep: number; headsign: string; startIdx?: number; pulsless?: boolean }>>;
 }
 
 export interface GtfsPollStop {

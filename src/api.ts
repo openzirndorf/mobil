@@ -21,25 +21,32 @@ export function evictSegmentCache(tripId: number): void {
 }
 
 // Via-point corrections for stop pairs where OSRM car routing takes the wrong road.
-// Keyed by "stopA.name→stopB.name" (names from PULS API).
-// Die echten Haltestellennamen aus der PULS-API nach Regex-Processing
-// (h.Haltestellenname.replace(/ \(Lkr\.FÜ\).*/, "").trim()):
-//   "Landratsamt (Zirndorf (Lkr.FÜ))"  → "Landratsamt (Zirndorf"
-//   "Am Grasweg (Zirndorf (Lkr.FÜ))"   → "Am Grasweg (Zirndorf"
-// Die alten Keys mit "Zirndorf X"-Format haben nie gegriffen!
+// Keyed by "stopA.name→stopB.name" (Namen nach cleanStopName(), z. B.
+// "Landratsamt (Zirndorf (Kr Fürth))" → "Landratsamt (Zirndorf)").
 const OSRM_VIA: Record<string, Array<{ lat: number; lng: number }>> = {
   // Vogelherdstr-Korridor (Linien 70, 72, N8):
   // Busse fahren durch Vogelherdstr; OSRM car routing nähme sonst Schwabacher Str.
   // Via-Punkt auf dem bidirektionalen Südabschnitt von Vogelherdstr (OSM way 23156774).
-  "Landratsamt (Zirndorf→Am Grasweg (Zirndorf":   [{ lat: 49.440382, lng: 10.951868 }],
-  "Am Grasweg (Zirndorf→Landratsamt (Zirndorf":   [{ lat: 49.440382, lng: 10.951868 }],
+  "Landratsamt (Zirndorf)→Am Grasweg (Zirndorf)":   [{ lat: 49.440382, lng: 10.951868 }],
+  "Am Grasweg (Zirndorf)→Landratsamt (Zirndorf)":   [{ lat: 49.440382, lng: 10.951868 }],
   // Marktplatz↔Landratsamt: kein Via-Punkt nötig – OSRM findet direkt die korrekte
   // Route via Schwabacher Str (533m/521m, lat 49.439–49.442).
   // Linie 70 Frühlingsmarkt-Umleitung dir=0: Kraftstr → Albert-Einstein-Str → Landratsamt
-  "Kraftstr. (Zirndorf→Landratsamt (Zirndorf":    [{ lat: 49.44437, lng: 10.95142 }],
+  "Kraftstr. (Zirndorf)→Landratsamt (Zirndorf)":    [{ lat: 49.44437, lng: 10.95142 }],
   // Linie 70 Frühlingsmarkt-Umleitung dir=1: Landratsamt → Brücknerstr (südl. Bypass)
-  "Landratsamt (Zirndorf→Brücknerstr. (Zirndorf": [{ lat: 49.43986, lng: 10.95803 }],
+  "Landratsamt (Zirndorf)→Brücknerstr. (Zirndorf)": [{ lat: 49.43986, lng: 10.95803 }],
 };
+
+/**
+ * PULS-Haltestellennamen vereinheitlichen. Altes Format "X (Zirndorf (Lkr.FÜ))",
+ * aktuell "X (Zirndorf (Kr Fürth))" bzw. "X (Oberasbach(Kr Fürth))" → "X (Zirndorf)".
+ */
+export function cleanStopName(name: string): string {
+  return name
+    .replace(/\s*\((?:Lkr\.\s*FÜ|Kr\.?\s*Fürth)\)/g, "")
+    .replace(/\s*\(\)$/, "")
+    .trim();
+}
 
 export async function fetchRoadSegments(
   tripId: number,
@@ -145,7 +152,7 @@ export async function fetchZirndorfStops(): Promise<Stop[]> {
       if (seen.has(h.VGNKennung)) continue;
       seen.add(h.VGNKennung);
       stops.push({
-        name: h.Haltestellenname.replace(/ \(Lkr\.FÜ\).*/, "").trim(),
+        name: cleanStopName(h.Haltestellenname),
         vgnId: h.VGNKennung,
         vagId: h.VAGKennung,
         lat: h.Latitude,
@@ -156,19 +163,67 @@ export async function fetchZirndorfStops(): Promise<Stop[]> {
   return stops;
 }
 
-export async function fetchStopDepartures(vgnId: number): Promise<{
-  stopName: string;
-  departures: Array<{
-    line: string; direction: string; scheduledTime: Date; actualTime: Date;
-    delayMin: number; product: string; prognose: boolean;
-  }>;
-}> {
-  const res = await fetch(
-    `${BASE}/abfahrten.json/vgn/${vgnId}?timespan=90`
+export interface StopDeparture {
+  line: string; direction: string; scheduledTime: Date; actualTime: Date;
+  delayMin: number; product: string; prognose: boolean;
+}
+
+// VGN-EFA: kennt alle Haltestellen im Verbund (PULS nur ~40 % der GTFS-IDs),
+// liefert aber nur Fahrplanzeiten, keine Echtzeit. Erlaubt CORS.
+const EFA = "https://efa.vgn.de/vgnExt_oeffi/XML_DM_REQUEST";
+
+interface EfaStopEvent {
+  departureTimePlanned?: string;
+  departureTimeEstimated?: string;
+  transportation?: { number?: string; disassembledName?: string; product?: { name?: string }; destination?: { name?: string } };
+}
+
+async function fetchEfaDepartures(gid: string): Promise<StopDeparture[]> {
+  const res = await fetchT(
+    `${EFA}?outputFormat=rapidJSON&type_dm=stop&name_dm=${encodeURIComponent(gid)}&mode=direct&useRealtime=1&limit=40&depType=stopEvents`
   );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json() as { stopEvents?: EfaStopEvent[] };
+  const until = Date.now() + 90 * 60_000;
+  return (data.stopEvents ?? [])
+    .filter((e) => e.departureTimePlanned)
+    .map((e) => {
+      const soll = new Date(e.departureTimePlanned!);
+      const ist = e.departureTimeEstimated ? new Date(e.departureTimeEstimated) : soll;
+      const t = e.transportation ?? {};
+      return {
+        line: t.disassembledName ?? t.number ?? "",
+        direction: t.destination?.name ?? "",
+        scheduledTime: soll,
+        actualTime: ist,
+        delayMin: Math.round((ist.getTime() - soll.getTime()) / 60000),
+        product: t.product?.name ?? "",
+        prognose: !!e.departureTimeEstimated,
+      };
+    })
+    .filter((d) => d.scheduledTime.getTime() <= until);
+}
+
+/**
+ * Abfahrten einer Haltestelle. PULS (mit Echtzeit), wenn PULS die Haltestelle
+ * kennt – sonst EFA (nur Fahrplan). Wirft bei Fehlern, damit die UI nicht
+ * fälschlich "Keine Abfahrten" zeigt.
+ */
+export async function fetchStopDepartures(
+  vgnId: number,
+  opts: { gid?: string; puls?: boolean } = {},
+): Promise<{ source: "puls" | "efa"; departures: StopDeparture[] }> {
+  if (opts.puls === false && opts.gid) {
+    return { source: "efa", departures: await fetchEfaDepartures(opts.gid) };
+  }
+  const res = await fetchT(`${BASE}/abfahrten.json/vgn/${vgnId}?timespan=90`);
+  if (!res.ok) {
+    if (opts.gid) return { source: "efa", departures: await fetchEfaDepartures(opts.gid) };
+    throw new Error(`HTTP ${res.status}`);
+  }
   const data = await res.json();
   return {
-    stopName: data.Haltestellenname ?? "",
+    source: "puls",
     departures: (data.Abfahrten ?? []).map((a: AbfahrtRaw) => {
       const soll = new Date(a.AbfahrtszeitSoll);
       const ist  = new Date(a.AbfahrtszeitIst);
@@ -238,6 +293,50 @@ export async function fetchActiveTripIds(stops: Stop[]): Promise<Map<number, Tri
   return tripMap;
 }
 
+// ── Fahrtverlauf-Cache ────────────────────────────────────────────────────────
+// Der komplette Fahrtverlauf (Haltestellen + Zeiten) ändert sich kaum – vorher
+// wurde er für jede Fahrt alle 15 s neu geladen (~2/3 aller PULS-Anfragen).
+// Jetzt nur noch alle TRIP_ROUTE_TTL_MS; die aktuelle Verspätung kommt weiter
+// alle 15 s aus den Abfahrtsmonitoren und wird auf die künftigen Halte übertragen.
+type TripRoute = { line: string; direction: string; vehicleId: string; stops: TripStop[] };
+const TRIP_ROUTE_TTL_MS = 60_000;
+const tripRouteCache = new Map<number, { route: TripRoute | null; ts: number }>();
+
+async function fetchTripRouteCached(
+  tripId: number,
+  info: TripInfo,
+  now: Date,
+): Promise<TripRoute | null> {
+  const cached = tripRouteCache.get(tripId);
+  if (cached && now.getTime() - cached.ts < TRIP_ROUTE_TTL_MS) {
+    return cached.route ? applyCurrentDelay(cached.route, info, now) : null;
+  }
+  const route = await fetchTripRoute(tripId, info.betriebstag, info.produkt);
+  tripRouteCache.set(tripId, { route, ts: now.getTime() });
+  // Alte Einträge (beendete Fahrten) aufräumen
+  for (const [id, e] of tripRouteCache) if (now.getTime() - e.ts > 10 * TRIP_ROUTE_TTL_MS) tripRouteCache.delete(id);
+  return route;
+}
+
+/** Aktuelle Verspätung (aus der nächsten bekannten Abfahrt) auf alle noch nicht erreichten Halte legen */
+function applyCurrentDelay(route: TripRoute, info: TripInfo, now: Date): TripRoute {
+  const ref = [...info.knownStops]
+    .sort((a, b) => a.departureSoll.getTime() - b.departureSoll.getTime())
+    .find((k) => k.departureIst >= now) ?? info.knownStops[info.knownStops.length - 1];
+  if (!ref) return route;
+  const delayMs = ref.departureIst.getTime() - ref.departureSoll.getTime();
+  const shift = (ist: Date | null, soll: Date | null) =>
+    ist && ist > now && soll ? new Date(Math.max(soll.getTime() + delayMs, now.getTime())) : ist;
+  return {
+    ...route,
+    stops: route.stops.map((s) => ({
+      ...s,
+      arrivalIst: shift(s.arrivalIst, s.arrivalSoll),
+      departureIst: shift(s.departureIst, s.departureSoll),
+    })),
+  };
+}
+
 async function fetchTripRoute(
   tripId: number,
   betriebstag: string,
@@ -253,7 +352,7 @@ async function fetchTripRoute(
 
     const stops: TripStop[] = (data.Fahrtverlauf as FahrtHaltRaw[]).map(
       (h) => ({
-        name: h.Haltestellenname.replace(/ \(Lkr\.FÜ\).*/, "").trim(),
+        name: cleanStopName(h.Haltestellenname),
         lat: h.Latitude,
         lng: h.Longitude,
         arrivalIst: parseDate(h.AnkunftszeitIst),
@@ -366,7 +465,7 @@ function nearestShapeStopIdx(stopCoords: [number, number][], lat: number, lng: n
 }
 
 // ── Schedule-only lines (DB-operated, not in VAG PULS API) ───────────────────
-const SCHEDULE_ONLY_LINES = new Set(["S4", "RB11", "RB 11"]);
+const SCHEDULE_ONLY_LINES = new Set(["S4", "RB11", "RB 11", "RE 90", "RE90"]);
 
 // ── DB REST API – real-time delays for S-Bahn / regional trains ───────────────
 const DB_REST = "https://v6.db.transport.rest";
@@ -443,10 +542,12 @@ async function findScheduledBuses(gtfs: GtfsData, now: Date): Promise<Bus[]> {
   const buses: Bus[] = [];
 
   for (const [shapeKey, shape] of Object.entries(gtfs.routeShapes)) {
-    if (!SCHEDULE_ONLY_LINES.has(shape.line)) continue;
     if (!shape.tripDepartures || !shape.stopTimes?.length) continue;
 
-    const deps = shape.tripDepartures[dayOfWeek];
+    // Schienenlinien komplett; sonst nur Fahrten, die PULS nicht findet
+    // (kein PULS-bekannter Halt im Gebiet, z. B. fast alle 126 – siehe build-gtfs.ts)
+    const scheduleOnly = SCHEDULE_ONLY_LINES.has(shape.line);
+    const deps = shape.tripDepartures[dayOfWeek]?.filter((d) => scheduleOnly || d.pulsless);
     if (!deps?.length) continue;
 
     const lastSec = shape.stopTimes[shape.stopTimes.length - 1];
@@ -530,7 +631,7 @@ export async function enrichBusDelays(buses: Bus[]): Promise<Bus[]> {
   return Promise.all(buses.map(async (bus) => {
     // Nur reine Fahrplan-Züge (negative tripId) – VAG-Busse haben schon Echtzeit.
     // DB-Werte darüberzulegen ließ sie alle 15 s zwischen zwei Positionen springen.
-    if (bus.tripId >= 0) return bus;
+    if (bus.tripId >= 0 || !SCHEDULE_ONLY_LINES.has(bus.line)) return bus;
     const refStop =
       bus.stops.find((s) => stopInZirndorf(s.lat, s.lng) && s.departureSoll != null && s.departureSoll >= now) ??
       bus.stops.find((s) => stopInZirndorf(s.lat, s.lng)) ??
@@ -632,14 +733,23 @@ function rebuildTripFromGtfs(
 export async function fetchAllBuses(stops: Stop[], gtfs?: GtfsData): Promise<Bus[]> {
   const tripMap = await fetchActiveTripIds(stops);
   const today = betriebstagNow();
+  const now = new Date();
+
+  // Seit Fürth Hbf/Roßtal Bahnhof Poll-Haltestellen sind, liefert PULS auch Schiene:
+  // Fahrplan-Linien (S4, RB 11, RE 90) kämen sonst doppelt, U1/S1 sind irrelevant –
+  // beides gar nicht erst nachladen (S-Bahn-Fahrtverläufe liefern ohnehin HTTP 400).
+  for (const [tripId, info] of tripMap) {
+    const isScheduleLine = SCHEDULE_ONLY_LINES.has(info.line) || SCHEDULE_ONLY_LINES.has(info.line.replace(/\s+/g, ""));
+    const isOtherRail = info.produkt !== "Bus" && !gtfs?.lineInfo[info.line];
+    if (isScheduleLine || isOtherRail) tripMap.delete(tripId);
+  }
 
   const routes = await Promise.allSettled(
     Array.from(tripMap.entries()).map(([tripId, info]) =>
-      fetchTripRoute(tripId, info.betriebstag, info.produkt).then((r) => ({ tripId, info, r }))
+      fetchTripRouteCached(tripId, info, now).then((r) => ({ tripId, info, r }))
     )
   );
 
-  const now = new Date();
   const buses: Bus[] = [];
 
   for (const res of routes) {
@@ -705,7 +815,7 @@ export async function fetchAllBuses(stops: Stop[], gtfs?: GtfsData): Promise<Bus
   // Add schedule-based buses for lines not served by the VAG PULS API
   if (gtfs) {
     const scheduled = await findScheduledBuses(gtfs, now);
-    console.log(`[schedule] ${scheduled.length} scheduled buses (S4/RB11)`);
+    console.log(`[schedule] ${scheduled.length} scheduled vehicles (rail + PULS-less trips)`);
     buses.push(...scheduled);
   }
 

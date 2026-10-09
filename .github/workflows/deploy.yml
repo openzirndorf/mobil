@@ -3,6 +3,10 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
+  # Wöchentlich neu bauen, damit Fahrplandaten (GTFS) nicht veralten –
+  # vorher wurden sie nur bei einem Push aktualisiert (zuletzt März → Oktober)
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
 permissions:

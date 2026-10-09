@@ -29,11 +29,12 @@
 
 ## Features
 
-- 🚌 **Live-Positionen** aller Busse (VAG/VGN) und Bahnen (S4, RB11) im Zirndorfer Raum
-- ⏱️ **Echtzeit-Verspätungsdaten** via VAG API + DB REST API
-- 🗓️ **Fahrplaninterpolation** für S-Bahn und Regionalbahn (GTFS-basiert)
+- 🚌 **Live-Positionen** aller Busse (VAG/VGN) und Bahnen (S4, RB 11, RE 90) im Zirndorfer Raum
+- ⏱️ **Echtzeit-Verspätungsdaten** für Busse via VAG PULS API (Züge via DB REST API, sofern erreichbar)
+- 🗓️ **Fahrplaninterpolation** für S-Bahn, Regionalbahn und Busfahrten, die PULS nicht kennt (GTFS-basiert)
 - 🛤️ **Schienenstrecken** exakt entlang der OSM-Gleisgeometrie
-- 🏠 **Haltestellenabfahrten** per Klick auf jede Haltestelle
+- 🏠 **Haltestellenabfahrten** per Klick auf jede Haltestelle (PULS mit Echtzeit, sonst Fahrplan aus der VGN-EFA)
+- 📲 **Installierbar (PWA)** – App-Shell, Kartenkacheln und Schriften werden gecacht
 - 📍 **POI-Layer:** Bushaltestellen, P+R, Fahrrad, Taxi, WC
 - ⚠️ **Störungsbanner** bei Linien mit hoher Durchschnittsverspätung
 
@@ -45,7 +46,8 @@
 | Frontend | React + TypeScript + Vite |
 | Karte | Leaflet + OpenStreetMap |
 | Echtzeitdaten Busse | VAG VGN API |
-| Echtzeitdaten Bahn | DB REST API (v6.db.transport.rest) |
+| Echtzeitdaten Bahn | DB REST API (v6.db.transport.rest) – derzeit oft nicht erreichbar |
+| Abfahrten ohne PULS | VGN EFA (`efa.vgn.de`, nur Fahrplan) |
 | Fahrplandaten | VGN GTFS Open Data |
 | Schienengeometrie | OpenStreetMap / Overpass API |
 | POI-Daten | OpenStreetMap / Overpass API |
@@ -119,9 +121,13 @@ https://github.com/<nutzer>/<repo>/actions/workflows/deploy.yml/badge.svg
 
 Repository → **Actions → Deploy to GitHub Pages → Run workflow**
 
-### Hinweis: gtfs_data.json
+### Hinweis: GTFS-Daten
 
-Die `public/gtfs_data.json` wird im Workflow bei jedem Deploy neu gebaut. Alternativ kann sie ins Repo eingecheckt werden — dann den `pnpm gtfs`-Schritt im Workflow entfernen.
+`public/gtfs_stops.json` und `public/gtfs_routes.json` werden im Workflow bei jedem Deploy neu gebaut – zusätzlich **wöchentlich per Cron** (montags), damit Fahrplanwechsel ankommen. Die eingecheckten Dateien dienen als Cache für die Streckengeometrie (BRouter/Overpass).
+
+Dabei prüft `pnpm gtfs` auch alle Haltestellen gegen die VAG PULS API und berechnet die **Poll-Haltestellen**: die kleinste Menge an Haltestellen, an deren Abfahrtsmonitoren jede Busfahrt im Gebiet vorbeikommt. Fahrten ohne PULS-bekannten Halt im Gebiet (z. B. Linie 126) werden als `pulsless` markiert und nach Fahrplan angezeigt.
+
+> GitHub deaktiviert Cron-Workflows nach 60 Tagen ohne Repo-Aktivität – dann unter *Actions* wieder aktivieren.
 
 ## Datenquellen & Lizenzen
 
@@ -130,6 +136,7 @@ Die `public/gtfs_data.json` wird im Workflow bei jedem Deploy neu gebaut. Altern
 | [VGN Echtzeitdaten](https://www.vgn.de/web-entwickler/open-data/) | CC BY 4.0 |
 | [VGN GTFS-Fahrplandaten](https://www.vgn.de/opendata/GTFS.zip) | CC BY 4.0 |
 | [DB REST API](https://v6.db.transport.rest) | hafas-client (MIT) |
+| [VGN EFA](https://www.vgn.de/web-entwickler/open-data/) | CC BY 4.0 |
 | [OpenStreetMap](https://www.openstreetmap.org) | ODbL |
 | [Overpass API](https://overpass-api.de) | ODbL |
 
@@ -138,15 +145,17 @@ Die `public/gtfs_data.json` wird im Workflow bei jedem Deploy neu gebaut. Altern
 ```
 src/
   App.tsx          # Hauptkomponente, Karte, UI
-  api.ts           # VAG/VGN + DB REST API, Positionsinterpolation
+  api.ts           # VAG PULS, VGN EFA, DB REST API, Positionsinterpolation
   gtfs.ts          # GTFS-Typen, Shape-Matching
   types.ts         # Gemeinsame TypeScript-Typen
   assets/          # Icons (bus.png, sbahn.png, haltestelle.png, …)
 scripts/
-  build-gtfs.ts    # GTFS-Parser + Overpass-Routing → public/gtfs_data.json
+  build-gtfs.ts    # GTFS-Parser, Routing, Poll-Haltestellen → public/gtfs_*.json
 docs/
   screenshot.png   # App-Screenshot für README
 public/
   CNAME            # Custom Domain für GitHub Pages
-  oz-logo.png      # OpenZirndorf Logo
+  oz-logo.png      # OpenZirndorf Logo (Original, nur README/Sharepic)
+  oz-logo-192.png  # Favicon, Ladebildschirm, PWA-Icon
+  oz-logo-512.png  # PWA-Icon
 ```

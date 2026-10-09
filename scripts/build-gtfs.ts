@@ -80,9 +80,11 @@ async function osrmRoute(
   const lonlats = stops.map((s) => `${s.lng},${s.lat}`).join("|");
   const url = `${BROUTER}?lonlats=${lonlats}&profile=car-fast&alternativeidx=0&format=geojson`;
   try {
-    const data = await fetch(url).then((r) => r.json()) as any;
+    const data = await fetch(url).then((r) => r.json()) as {
+      features: Array<{ geometry: { coordinates: Array<[number, number, number?]> } }>;
+    };
     const coords: [number, number][] = data.features[0].geometry.coordinates.map(
-      ([lng, lat]: [number, number, number?]) => [lat, lng] as [number, number]
+      ([lng, lat]) => [lat, lng] as [number, number]
     );
     return coords;
   } catch {
@@ -277,48 +279,57 @@ async function pulsKnowsStop(vgnId: string): Promise<boolean> {
   }
 }
 
-async function computePollStops(
-  tripStopSeqs: Record<string, Array<{ stopId: string }>>,
-  trips: Record<string, { routeId: string }>,
-  routes: Record<string, { line: string }>,
-  stops: Record<string, { name: string; lat: number; lng: number; vgnId: string }>,
-): Promise<Array<{ vgnId: number; name: string; lat: number; lng: number }>> {
-  console.log("🎯 Computing poll stops…");
-  const inBbox = (s: { lat: number; lng: number }) =>
-    s.lat >= POLL_BBOX.latMin && s.lat <= POLL_BBOX.latMax && s.lng >= POLL_BBOX.lngMin && s.lng <= POLL_BBOX.lngMax;
-
-  // Pro Fahrt: Menge der VGN-IDs im Gebiet (identische Mengen zusammengefasst, mit Anzahl)
-  const tripSets = new Map<string, { ids: Set<string>; count: number; line: string }>();
-  for (const [tripId, seq] of Object.entries(tripStopSeqs)) {
-    const line = routes[trips[tripId]?.routeId]?.line;
-    if (!line || POLL_SKIP_LINES.has(line)) continue;
-    const ids = new Set(seq.map((s) => stops[s.stopId]).filter((s) => s?.vgnId && inBbox(s)).map((s) => s.vgnId));
-    if (!ids.size) continue;
-    const key = [...ids].sort().join(",");
-    const entry = tripSets.get(key);
-    if (entry) entry.count++; else tripSets.set(key, { ids, count: 1, line });
-  }
-
-  // Kandidaten gegen PULS prüfen – viele GTFS-IDs existieren dort nicht (404)
-  const candidates = [...new Set([...tripSets.values()].flatMap((t) => [...t.ids]))];
+/** Alle IDs gegen PULS prüfen – viele GTFS-IDs existieren dort nicht (404) */
+async function checkPulsStops(vgnIds: string[]): Promise<Set<string>> {
   const valid = new Set<string>();
-  const queue = [...candidates];
+  const queue = [...vgnIds];
   await Promise.all(Array.from({ length: 8 }, async () => {
     while (queue.length) {
       const id = queue.shift()!;
       if (await pulsKnowsStop(id)) valid.add(id);
     }
   }));
-  console.log(`   ${valid.size}/${candidates.length} candidate stops known to PULS`);
+  console.log(`   ${valid.size}/${vgnIds.length} stops known to PULS`);
+  return valid;
+}
 
-  const uncovered = new Map<string, { ids: Set<string>; count: number }>();
-  const uncoverable = new Map<string, number>();
-  for (const [key, t] of tripSets) {
-    const ids = new Set([...t.ids].filter((id) => valid.has(id)));
-    if (ids.size) uncovered.set(key, { ids, count: t.count });
-    else uncoverable.set(t.line, (uncoverable.get(t.line) ?? 0) + t.count);
+/**
+ * Liefert die Poll-Haltestellen und die Fahrten, die über PULS gar nicht
+ * auffindbar sind (kein PULS-bekannter Halt im Gebiet, z. B. fast alle 126).
+ * Letztere zeigt die App nach Fahrplan an, wie S4/RB 11.
+ */
+function computePollStops(
+  tripStopSeqs: Record<string, Array<{ stopId: string }>>,
+  trips: Record<string, { routeId: string }>,
+  routes: Record<string, { line: string }>,
+  stops: Record<string, { name: string; lat: number; lng: number; vgnId: string }>,
+  pulsKnown: Set<string>,
+): { pollStops: Array<{ vgnId: number; name: string; lat: number; lng: number }>; pulslessTrips: Set<string> } {
+  console.log("🎯 Computing poll stops…");
+  const inBbox = (s: { lat: number; lng: number }) =>
+    s.lat >= POLL_BBOX.latMin && s.lat <= POLL_BBOX.latMax && s.lng >= POLL_BBOX.lngMin && s.lng <= POLL_BBOX.lngMax;
+
+  // Pro Fahrt: Menge der PULS-bekannten VGN-IDs im Gebiet (identische Mengen zusammengefasst)
+  const tripSets = new Map<string, { ids: Set<string>; count: number }>();
+  const pulslessTrips = new Set<string>();
+  const pulslessByLine = new Map<string, number>();
+  for (const [tripId, seq] of Object.entries(tripStopSeqs)) {
+    const line = routes[trips[tripId]?.routeId]?.line;
+    if (!line || POLL_SKIP_LINES.has(line)) continue;
+    const inArea = seq.map((s) => stops[s.stopId]).filter((s) => s?.vgnId && inBbox(s));
+    if (!inArea.length) continue;
+    const ids = new Set(inArea.map((s) => s.vgnId).filter((id) => pulsKnown.has(id)));
+    if (!ids.size) {
+      pulslessTrips.add(tripId);
+      pulslessByLine.set(line, (pulslessByLine.get(line) ?? 0) + 1);
+      continue;
+    }
+    const key = [...ids].sort().join(",");
+    const entry = tripSets.get(key);
+    if (entry) entry.count++; else tripSets.set(key, { ids, count: 1 });
   }
 
+  const uncovered = new Map(tripSets);
   const chosen: string[] = [];
   while (uncovered.size) {
     const gain = new Map<string, number>();
@@ -327,18 +338,20 @@ async function computePollStops(
     chosen.push(best);
     for (const [key, t] of uncovered) if (t.ids.has(best)) uncovered.delete(key);
   }
-  if (uncoverable.size) {
-    console.warn(`   ⚠ trips without PULS-known stop in the area: ${[...uncoverable].map(([l, n]) => `${l}×${n}`).join(", ")}`);
+  if (pulslessByLine.size) {
+    console.log(`   trips without PULS-known stop (→ Fahrplan): ${[...pulslessByLine].map(([l, n]) => `${l}×${n}`).join(", ")}`);
   }
 
   const byVgnId = new Map(Object.values(stops).filter((s) => s.vgnId).map((s) => [s.vgnId, s]));
-  const result = chosen.sort().map((id) => {
+  const pollStops = chosen.sort().map((id) => {
     const s = byVgnId.get(id)!;
     return { vgnId: parseInt(id), name: s.name, lat: s.lat, lng: s.lng };
   });
-  console.log(`   ${result.length} poll stops: ${result.map((s) => s.name).join(", ")}`);
-  return result;
+  console.log(`   ${pollStops.length} poll stops: ${pollStops.map((s) => s.name).join(", ")}`);
+  return { pollStops, pulslessTrips };
 }
+
+type TripDeparture = { dep: number; headsign: string; startIdx?: number; pulsless?: boolean };
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -400,14 +413,16 @@ async function main() {
   // 2. Parse ALL stops (we filter later by which trips use them)
   console.log("📍 Parsing stops…");
   const stopData = await readZipFile(GTFS_CACHE, "stops.txt");
-  const stops: Record<string, { name: string; lat: number; lng: number; vgnId: string }> = {};
+  const stops: Record<string, { name: string; lat: number; lng: number; vgnId: string; gid: string }> = {};
 
   for (const r of parseCsv(stopData)) {
     if (r.location_type !== "") continue;
     const lat = parseFloat(r.stop_lat), lng = parseFloat(r.stop_lon);
-    const m = r.stop_id.match(/de:\d+:(\d+):/);
-    const vgnId = m ? m[1] : "";
-    stops[r.stop_id] = { name: r.stop_name, lat, lng, vgnId };
+    const m = r.stop_id.match(/^(de:\d+:(\d+)):/);
+    const vgnId = m ? m[2] : "";
+    // Globale ID (DHID) der Haltestelle, z. B. "de:09573:5500" – für die VGN-EFA
+    const gid = m ? m[1] : "";
+    stops[r.stop_id] = { name: r.stop_name, lat, lng, vgnId, gid };
   }
   console.log(`   ${Object.keys(stops).length} total stops loaded`);
 
@@ -485,6 +500,11 @@ async function main() {
   }
   console.log(`   ${Object.keys(tripStopSeqs).length} trips, ${usedStopIds.size} distinct stops used`);
 
+  // 5b. PULS-Abdeckung prüfen → Poll-Haltestellen + Fahrten nur nach Fahrplan
+  const usedVgnIds = [...new Set([...usedStopIds].map((id) => stops[id]?.vgnId).filter(Boolean))];
+  const pulsKnown = await checkPulsStops(usedVgnIds);
+  const { pollStops, pulslessTrips } = computePollStops(tripStopSeqs, trips, routes, stops, pulsKnown);
+
   // 6. Find canonical route variant per (routeId + direction [+ headsign for rail])
   //    = the trip with the most stops (= fullest variant)
   //    Rail lines get per-headsign variants so Fürth-bound and Nürnberg-bound
@@ -510,9 +530,9 @@ async function main() {
 
   // 6b. Collect departure times per variant per day-of-week
   console.log("🗓  Collecting departure times per day…");
-  const variantDepartures: Record<string, Array<Array<{ dep: number; headsign: string }>>> = {};
+  const variantDepartures: Record<string, Array<Array<TripDeparture>>> = {};
   for (const [key, variant] of Object.entries(routeVariants)) {
-    const depsPerDay: Array<Array<{ dep: number; headsign: string }>> = Array.from({ length: 7 }, () => []);
+    const depsPerDay: Array<Array<TripDeparture>> = Array.from({ length: 7 }, () => []);
     const canonFirstId = variant.stopIds[0];
     for (const [tripId, seq] of Object.entries(tripStopSeqs)) {
       const t = trips[tripId];
@@ -542,7 +562,11 @@ async function main() {
       const cal = serviceCalendar.get(t.serviceId);
       if (!cal) continue;
       for (let d = 0; d < 7; d++) {
-        if (cal[d]) depsPerDay[d].push({ dep: depSec, headsign: t.headsign, ...(startIdx ? { startIdx } : {}) });
+        if (cal[d]) depsPerDay[d].push({
+          dep: depSec, headsign: t.headsign,
+          ...(startIdx ? { startIdx } : {}),
+          ...(pulslessTrips.has(tripId) ? { pulsless: true } : {}),
+        });
       }
     }
     for (const arr of depsPerDay) arr.sort((a, b) => a.dep - b.dep);
@@ -557,7 +581,7 @@ async function main() {
   let existingShapes: Record<string, { coords: Array<[number, number]> }> = {};
   const cacheFile = fs.existsSync(OUT_ROUTES) ? OUT_ROUTES : OUT_FILE;
   if (fs.existsSync(cacheFile)) {
-    try { existingShapes = JSON.parse(fs.readFileSync(cacheFile, "utf8")).routeShapes ?? {}; } catch {}
+    try { existingShapes = JSON.parse(fs.readFileSync(cacheFile, "utf8")).routeShapes ?? {}; } catch { /* kaputter Cache → alles neu routen */ }
   }
 
   const routeShapes: Record<
@@ -570,7 +594,7 @@ async function main() {
       stopCoords: Array<[number, number]>;
       stopNames: string[];
       stopTimes: number[];
-      tripDepartures: Array<Array<{ dep: number; headsign: string }>>;
+      tripDepartures: Array<Array<TripDeparture>>;
     }
   > = {};
 
@@ -649,11 +673,11 @@ async function main() {
 
   // 8. Build final output
   // Collect all Steige per VGN ID (each platform as a separate position)
-  const vgnIdGroups: Record<string, { name: string; positions: Array<{ lat: number; lng: number }> }> = {};
+  const vgnIdGroups: Record<string, { name: string; gid: string; positions: Array<{ lat: number; lng: number }> }> = {};
   for (const stopId of usedStopIds) {
     const s = stops[stopId];
     if (!s?.vgnId) continue;
-    if (!vgnIdGroups[s.vgnId]) vgnIdGroups[s.vgnId] = { name: s.name, positions: [] };
+    if (!vgnIdGroups[s.vgnId]) vgnIdGroups[s.vgnId] = { name: s.name, gid: s.gid, positions: [] };
     const existing = vgnIdGroups[s.vgnId].positions;
     // Deduplicate identical coordinates (different stop_ids can share a position)
     if (!existing.some((p) => p.lat === s.lat && p.lng === s.lng)) {
@@ -661,18 +685,19 @@ async function main() {
     }
   }
   const stopsByVgnId = Object.fromEntries(
-    Object.entries(vgnIdGroups).map(([vgnId, { name, positions }]) => [
+    Object.entries(vgnIdGroups).map(([vgnId, { name, gid, positions }]) => [
       vgnId,
       {
         name,
         lat: positions[0].lat,
         lng: positions[0].lng,
         steige: positions.length > 1 ? positions : undefined,
+        gid,
+        // PULS kennt die Haltestelle nicht → App holt Abfahrten (Fahrplan) aus der VGN-EFA
+        ...(pulsKnown.has(vgnId) ? {} : { puls: false }),
       },
     ])
   );
-
-  const pollStops = await computePollStops(tripStopSeqs, trips, routes, stops);
 
   const generated = new Date().toISOString();
 

@@ -1,12 +1,13 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { enrichBusDelays, evictSegmentCache, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, pollStopsFromGtfs, refreshPositions, stopInZirndorf } from "./api";
+import { enrichBusDelays, evictSegmentCache, fetchAllBuses, fetchRoadSegments, fetchStopDepartures, fetchZirndorfStops, pollStopsFromGtfs, refreshPositions, stopInZirndorf, type StopDeparture } from "./api";
 import {
   buildCoordRanges,
   loadGtfsData,
   type GtfsData,
   type GtfsRouteShape,
+  type GtfsStop,
 } from "./gtfs";
 import type { Bus, Stop } from "./types";
 import busImgUrl from "./assets/bus.png";
@@ -230,10 +231,10 @@ function makeBusIcon(line: string, delay: number, bearing: number, routeType?: n
   const transform = busTransform(bearing);
   const { src } = vehicleImg(routeType, line);
   return L.divIcon({
-    className: "",
+    className: "bus-marker",
     html: `
       <div style="position:relative;width:${box}px;height:${box}px;pointer-events:none;">
-        <div style="position:absolute;top:50%;left:50%;
+        <div class="bus-rot" style="position:absolute;top:50%;left:50%;
           transform:translate(-50%,-50%) ${transform};
           filter:drop-shadow(0 2px 5px rgba(0,0,0,0.55));">
           <img src="${src}" width="${w}" height="${h}" style="display:block;" />
@@ -248,16 +249,41 @@ function makeBusIcon(line: string, delay: number, bearing: number, routeType?: n
   });
 }
 
-function makeStopIcon(isZirndorf = false, zoom = 13): L.DivIcon {
+// ── Stop markers (Canvas statt 693 DOM-Elemente) ─────────────────────────────
+//
+// Vorher ein L.divIcon pro Haltestelle/Steig; beim Zoomen bekamen alle ein neues
+// Icon → spürbares Ruckeln auf dem Handy. Jetzt CircleMarker auf einem gemeinsamen
+// Canvas, die statt eines Kreises das Haltestellen-Bild zeichnen. Klick/Tooltip
+// funktionieren unverändert (Trefferfläche = Kreis).
+
+function stopIconSize(isZirndorf: boolean, zoom: number): number {
   const base = Math.round(Math.max(6, Math.min(32, 16 + (zoom - 13) * 3)));
-  const size = isZirndorf ? base : Math.round(base * 0.7);
-  return L.divIcon({
-    className: "",
-    html: `<img src="${haltestelleImgUrl}" width="${size}" height="${size}"
-      style="display:block;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.4))${isZirndorf ? "" : " opacity(0.6)"}" />`,
-    iconAnchor: [size / 2, size / 2],
-  });
+  return isZirndorf ? base : Math.round(base * 0.7);
 }
+
+const stopImg = new Image();
+stopImg.src = haltestelleImgUrl;
+
+type StopMarkerOptions = L.CircleMarkerOptions & { dim?: boolean };
+interface StopMarkerInternals {
+  _renderer: { _ctx?: CanvasRenderingContext2D };
+  _point: L.Point;
+  _radius: number;
+  options: StopMarkerOptions;
+}
+
+const StopMarker = L.CircleMarker.extend({
+  _updatePath(this: StopMarkerInternals) {
+    const ctx = this._renderer._ctx;
+    if (!ctx || !stopImg.complete || !stopImg.naturalWidth) return;
+    const w = this._radius * 2;
+    const h = w * (stopImg.naturalHeight / stopImg.naturalWidth);
+    ctx.save();
+    ctx.globalAlpha = this.options.dim ? 0.6 : 1;
+    ctx.drawImage(stopImg, this._point.x - w / 2, this._point.y - h / 2, w, h);
+    ctx.restore();
+  },
+}) as unknown as new (latlng: L.LatLngExpression, options: StopMarkerOptions) => L.CircleMarker;
 
 // ── POI icons ─────────────────────────────────────────────────────────────────
 
@@ -315,13 +341,15 @@ export default function App() {
   const stopLayerRef = useRef<L.LayerGroup | null>(null);
   const poiLayerRef = useRef<L.LayerGroup | null>(null);
   const busMarkersRef = useRef<Map<number, L.Marker>>(new Map());
+  const busIconKeyRef = useRef<Map<number, string>>(new Map());
   const routeLinesRef = useRef<Map<number, L.Polyline>>(new Map());
   // GTFS shape coord-ranges cache per tripId
   const shapeRangesRef = useRef<Map<number, { shape: GtfsRouteShape; ranges: number[] }>>(new Map());
   // OSRM fallback segments for buses without a matching GTFS shape
   const osrmSegmentsRef = useRef<Map<number, [number, number][][]>>(new Map());
   // Stop markers with isZirn flag for zoom-only icon updates
-  const stopMarkersDataRef = useRef<Array<{ marker: L.Marker; isZirn: boolean }>>([]);
+  const stopMarkersDataRef = useRef<Array<{ marker: L.CircleMarker; isZirn: boolean }>>([]);
+  const stopRendererRef = useRef<L.Canvas | null>(null);
   // Trips already routed with correct detour stops (to avoid re-clearing on every tick)
   const detourRoutedRef = useRef<Set<number>>(new Set());
   // Guard: fetch Overpass POI data only once, on first POI-layer activation
@@ -338,11 +366,22 @@ export default function App() {
   const [selectedBus, setSelectedBus] = useState<Bus | null>(null);
   const [selectedStop, setSelectedStop] = useState<{
     vgnId: number; name: string; loading: boolean;
-    departures: Array<{
-      line: string; direction: string; scheduledTime: Date; actualTime: Date;
-      delayMin: number; product: string;
-    }>;
+    /** Laden fehlgeschlagen – nicht als "keine Abfahrten" darstellen */
+    error?: boolean;
+    /** "efa" = nur Fahrplanzeiten (PULS kennt die Haltestelle nicht) */
+    source?: "puls" | "efa";
+    departures: StopDeparture[];
   } | null>(null);
+
+  const openStop = (vgnId: number, stop: GtfsStop) => {
+    setSelectedBus(null);
+    setSelectedStop({ vgnId, name: stop.name, loading: true, departures: [] });
+    const onlyIfCurrent = (next: NonNullable<typeof selectedStop>) =>
+      setSelectedStop((prev) => prev?.vgnId === vgnId ? next : prev);
+    fetchStopDepartures(vgnId, { gid: stop.gid, puls: stop.puls })
+      .then(({ source, departures }) => onlyIfCurrent({ vgnId, name: stop.name, loading: false, source, departures }))
+      .catch(() => onlyIfCurrent({ vgnId, name: stop.name, loading: false, error: true, departures: [] }));
+  };
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -352,21 +391,24 @@ export default function App() {
   const [showSlowHint, setShowSlowHint] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
 
-  // Fade out loading overlay once first data arrives
+  // Overlay verschwindet, sobald Karte + Haltestellen stehen (GTFS-Haltestellen,
+  // bei Folgebesuchen direkt aus IndexedDB) – nicht erst nach den Echtzeitdaten,
+  // die dauern 2–5 s. Fahrzeuge erscheinen danach, Sidebar zeigt solange "Lade…".
+  const appReady = !loading || gtfs !== null;
   useEffect(() => {
-    if (!loading && overlayVisible) {
+    if (appReady && overlayVisible) {
       setOverlayFading(true);
-      const t = setTimeout(() => setOverlayVisible(false), 500);
+      const t = setTimeout(() => setOverlayVisible(false), 300);
       return () => clearTimeout(t);
     }
-  }, [loading, overlayVisible]);
+  }, [appReady, overlayVisible]);
 
   // Show "first load takes longer" hint after 4 s of waiting
   useEffect(() => {
-    if (!loading) return;
+    if (appReady) return;
     const t = setTimeout(() => setShowSlowHint(true), 4_000);
     return () => clearTimeout(t);
-  }, [loading]);
+  }, [appReady]);
 
   const busesRef = useRef<Bus[]>([]);
   busesRef.current = buses;
@@ -390,6 +432,10 @@ export default function App() {
     L.control.zoom({ position: "bottomright" }).addTo(map);
     stopLayerRef.current = L.layerGroup().addTo(map);
     map.on("zoomend", () => setZoom(map.getZoom()));
+    // Weiche Fahrzeugbewegung per CSS-Transition – beim Zoomen aus, sonst
+    // gleiten die Marker sichtbar von der alten an die neue Pixelposition
+    map.on("zoomstart", () => map.getContainer().classList.add("zooming"));
+    map.on("zoomend", () => setTimeout(() => map.getContainer().classList.remove("zooming"), 50));
     mapInstance.current = map;
     return () => { map.remove(); mapInstance.current = null; };
   }, []);
@@ -474,29 +520,28 @@ export default function App() {
     stopMarkersDataRef.current = [];
     if (!stopsVisible) { stopLayerRef.current.remove(); return; }
     stopLayerRef.current.addTo(map);
+    const renderer = stopRendererRef.current ??= L.canvas({ padding: 0.3 });
 
     for (const [vgnId, stop] of Object.entries(gtfs.stopsByVgnId)) {
       const vgnIdNum = parseInt(vgnId);
       const positions = stop.steige ?? [{ lat: stop.lat, lng: stop.lng }];
       for (const pos of positions) {
         const isZirn = stopInZirndorf(pos.lat, pos.lng);
-        const marker = L.marker([pos.lat, pos.lng], {
-          icon: makeStopIcon(isZirn, zoom),
-          zIndexOffset: isZirn ? 0 : -200,
+        const marker = new StopMarker([pos.lat, pos.lng], {
+          renderer,
+          radius: stopIconSize(isZirn, zoom) / 2,
+          dim: !isZirn,
+          bubblingMouseEvents: false,
         })
           .bindTooltip(stop.name, { direction: "top", offset: [0, -6] })
-          .on("click", () => {
-            setSelectedBus(null);
-            setSelectedStop({ vgnId: vgnIdNum, name: stop.name, loading: true, departures: [] });
-            fetchStopDepartures(vgnIdNum).then((result) => {
-              setSelectedStop({ vgnId: vgnIdNum, name: stop.name, loading: false, departures: result.departures });
-            }).catch(() => {
-              setSelectedStop((prev) => prev?.vgnId === vgnIdNum ? { ...prev, loading: false } : prev);
-            });
-          })
+          .on("click", () => openStop(vgnIdNum, stop))
           .addTo(stopLayerRef.current!);
         stopMarkersDataRef.current.push({ marker, isZirn });
       }
+    }
+    // Bild noch nicht geladen → nach dem Laden einmal neu zeichnen
+    if (!stopImg.complete) {
+      stopImg.onload = () => stopMarkersDataRef.current.forEach(({ marker }) => marker.redraw());
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gtfs, stopsVisible]);
@@ -504,7 +549,7 @@ export default function App() {
   // ── Update stop icon sizes on zoom (no full rebuild) ─────────────────────────
   useEffect(() => {
     for (const { marker, isZirn } of stopMarkersDataRef.current) {
-      marker.setIcon(makeStopIcon(isZirn, zoom));
+      marker.setRadius(stopIconSize(isZirn, zoom) / 2);
     }
   }, [zoom]);
 
@@ -586,12 +631,13 @@ export default function App() {
 
     const activeIds = new Set(buses.map((b) => b.tripId));
     for (const [id, m] of busMarkersRef.current) {
-      if (!activeIds.has(id)) { m.remove(); busMarkersRef.current.delete(id); }
+      if (!activeIds.has(id)) { m.remove(); busMarkersRef.current.delete(id); busIconKeyRef.current.delete(id); }
     }
     for (const [id, l] of routeLinesRef.current) {
       if (!activeIds.has(id)) { l.remove(); routeLinesRef.current.delete(id); }
     }
 
+    const staticNotices = activeNotices();
     for (const bus of buses) {
       if (!bus.position) continue;
       const color = delayColor(bus.delayMinutes);
@@ -690,8 +736,12 @@ export default function App() {
 
       // ── Bus marker ──────────────────────────────────────────────────────────
       const routeType = gtfs?.lineInfo[bus.line]?.type;
-      const icon = makeBusIcon(bus.line, bus.delayMinutes, bearing, routeType);
+      // Icon nur neu bauen, wenn sich Linie/Farbe/Typ ändern – vorher jede Sekunde
+      // für jedes Fahrzeug (DOM + Bild neu → Flackern, Akku). Drehung direkt setzen.
+      const iconKey = `${bus.line}|${delayColor(bus.delayMinutes)}|${routeType}`;
       if (!busMarkersRef.current.has(bus.tripId)) {
+        const icon = makeBusIcon(bus.line, bus.delayMinutes, bearing, routeType);
+        busIconKeyRef.current.set(bus.tripId, iconKey);
         const marker = L.marker([displayLat, displayLng], { icon, zIndexOffset: 500 })
           .bindTooltip(
             `Linie ${bus.line} → ${bus.direction}<br>${delayLabel(bus.delayMinutes)}`,
@@ -703,7 +753,13 @@ export default function App() {
       } else {
         const marker = busMarkersRef.current.get(bus.tripId)!;
         marker.setLatLng([displayLat, displayLng]);
-        marker.setIcon(icon);
+        if (busIconKeyRef.current.get(bus.tripId) !== iconKey) {
+          marker.setIcon(makeBusIcon(bus.line, bus.delayMinutes, bearing, routeType));
+          busIconKeyRef.current.set(bus.tripId, iconKey);
+        } else {
+          const rot = marker.getElement()?.querySelector<HTMLElement>(".bus-rot");
+          if (rot) rot.style.transform = `translate(-50%,-50%) ${busTransform(bearing)}`;
+        }
         marker.setTooltipContent(
           `Linie ${bus.line} → ${bus.direction}<br>${delayLabel(bus.delayMinutes)}`
         );
@@ -771,7 +827,7 @@ export default function App() {
               <div className="loading-road" />
             </div>
             <div className="loading-spinner" aria-hidden="true" />
-            <span className="loading-status">Echtzeitdaten werden geladen…</span>
+            <span className="loading-status">Karte wird geladen…</span>
             {showSlowHint && (
               <p className="loading-slow-hint">Beim ersten Besuch etwas länger –<br />danach startet die App sofort.</p>
             )}
@@ -928,8 +984,13 @@ export default function App() {
               </strong>
               <button type="button" className="close-btn" onClick={() => setSelectedStop(null)}>✕</button>
             </div>
+            {selectedStop.source === "efa" && !selectedStop.loading && (
+              <div className="stop-source-note">Fahrplanzeiten ohne Echtzeit (Quelle: VGN)</div>
+            )}
             {selectedStop.loading ? (
               <div className="empty">Lade Abfahrten…</div>
+            ) : selectedStop.error ? (
+              <div className="empty">Abfahrten konnten nicht geladen werden.</div>
             ) : selectedStop.departures.length === 0 ? (
               <div className="empty">Keine Abfahrten in den nächsten 90 Min.</div>
             ) : (
