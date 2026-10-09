@@ -1,0 +1,6 @@
+# Pakete erst ab 1 Tag Alter installieren (wie die Default-Policy von pnpm 11+ in der CI)
+minimumReleaseAge: 1440
+
+# esbuild (für tsx / pnpm gtfs) darf sein Postinstall-Skript ausführen
+allowBuilds:
+  esbuild: true
